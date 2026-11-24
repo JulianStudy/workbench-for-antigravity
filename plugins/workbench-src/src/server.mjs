@@ -7,17 +7,52 @@ import {
   registerAppTool,
   RESOURCE_MIME_TYPE,
 } from '@modelcontextprotocol/ext-apps/server';
-import { resolveProjectRootFromPluginDir } from './root.mjs';
+import { resolveProjectRootFromPluginDir, validateRootBinding } from './root.mjs';
 import { ACCEPTANCE_CRITERION, createCheckRunner } from './check.mjs';
 
 export const WORKBENCH_UI_URI = 'ui://workbench/pane.html';
+export const DEFAULT_ENTRY_TITLE = 'Workbench';
 
-export function resolveRuntimeContext(pluginDir) {
+export function parseServerArgs(argv = []) {
+  let expectedRoot = null;
+  let entryTitle = DEFAULT_ENTRY_TITLE;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--expected-root') {
+      const next = argv[i + 1];
+      if (typeof next === 'string' && !next.startsWith('--')) {
+        expectedRoot = next.trim() ? next : null;
+        i += 1;
+      } else {
+        expectedRoot = null;
+      }
+    } else if (arg.startsWith('--expected-root=')) {
+      const val = arg.slice('--expected-root='.length);
+      expectedRoot = val.trim() ? val : null;
+    } else if (arg === '--entry-title') {
+      const next = argv[i + 1];
+      if (typeof next === 'string' && !next.startsWith('--')) {
+        entryTitle = next.trim() || DEFAULT_ENTRY_TITLE;
+        i += 1;
+      }
+    } else if (arg.startsWith('--entry-title=')) {
+      const val = arg.slice('--entry-title='.length).trim();
+      entryTitle = val || DEFAULT_ENTRY_TITLE;
+    }
+  }
+
+  return { expectedRoot, entryTitle };
+}
+
+export function resolveRuntimeContext(pluginDir, { expectedRoot } = {}) {
   try {
     const projectRoot = resolveProjectRootFromPluginDir(pluginDir);
+    const boundRoot = validateRootBinding(projectRoot, expectedRoot);
     return {
       ok: true,
       projectRoot,
+      expectedRoot: boundRoot,
       pluginDir: fs.realpathSync(pluginDir),
       rootError: null,
     };
@@ -25,6 +60,7 @@ export function resolveRuntimeContext(pluginDir) {
     return {
       ok: false,
       projectRoot: null,
+      expectedRoot: expectedRoot || null,
       pluginDir,
       rootError: err instanceof Error ? err.message : String(err),
     };
@@ -63,13 +99,20 @@ function summarizeStatusText(snapshot) {
   return parts.join(' | ');
 }
 
-export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
+export function createWorkbenchServer({
+  pluginDir,
+  paneHtmlPath,
+  expectedRoot = null,
+  entryTitle = DEFAULT_ENTRY_TITLE,
+}) {
   const server = new McpServer({
     name: 'workbench',
     version: '0.1.0',
   });
 
-  const runtimeCtx = resolveRuntimeContext(pluginDir);
+  const runtimeCtx = resolveRuntimeContext(pluginDir, { expectedRoot });
+  const resolvedEntryTitle =
+    typeof entryTitle === 'string' && entryTitle.trim() ? entryTitle.trim() : DEFAULT_ENTRY_TITLE;
   const runner = runtimeCtx.ok
     ? createCheckRunner({ projectRoot: runtimeCtx.projectRoot })
     : null;
@@ -146,7 +189,7 @@ export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
     server,
     'open_workbench',
     {
-      title: 'Workbench',
+      title: resolvedEntryTitle,
       description: 'Open the Workbench acceptance check side panel for this workspace.',
       _meta: {
         ui: {
@@ -156,7 +199,7 @@ export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
           entrypoints: [
             {
               type: 'aux_pane',
-              title: 'Workbench',
+              title: resolvedEntryTitle,
             },
           ],
         },
@@ -262,11 +305,19 @@ async function main() {
       : path.dirname(path.resolve(process.argv[1]));
   const pluginDir = path.resolve(serverDir, '..');
   const paneHtmlPath = path.join(serverDir, 'pane.html');
+  const { expectedRoot, entryTitle } = parseServerArgs(process.argv.slice(2));
 
-  const server = createWorkbenchServer({ pluginDir, paneHtmlPath });
+  const server = createWorkbenchServer({
+    pluginDir,
+    paneHtmlPath,
+    expectedRoot,
+    entryTitle,
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write(`[workbench] MCP server started (pluginDir=${pluginDir}, node=${process.version})\n`);
+  process.stderr.write(
+    `[workbench] MCP server started (pluginDir=${pluginDir}, expectedRoot=${expectedRoot || 'UNBOUND'}, entryTitle=${entryTitle}, node=${process.version})\n`
+  );
 }
 
 if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) {

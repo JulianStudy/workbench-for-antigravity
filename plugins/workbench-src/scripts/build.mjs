@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
+import { installWorkspacePlugin } from './install-workspace.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,7 +11,7 @@ const repoRoot = path.resolve(pkgRoot, '../..');
 
 const srcDir = path.join(pkgRoot, 'src');
 const distPluginDir = path.join(repoRoot, 'dist', 'workbench');
-const demoPluginDir = path.join(repoRoot, 'work', 'workbench-demo', '.agents', 'plugins', 'workbench');
+const demoProjectDir = path.join(repoRoot, 'work', 'workbench-demo');
 
 async function buildUiHtml() {
   const uiBundle = await esbuild.build({
@@ -52,12 +53,6 @@ async function buildServerBundle(outfile) {
   });
 }
 
-function copyDirClean(src, dest) {
-  fs.rmSync(dest, { recursive: true, force: true });
-  fs.mkdirSync(dest, { recursive: true });
-  fs.cpSync(src, dest, { recursive: true });
-}
-
 async function main() {
   fs.rmSync(distPluginDir, { recursive: true, force: true });
   fs.mkdirSync(path.join(distPluginDir, 'dist'), { recursive: true });
@@ -76,13 +71,15 @@ async function main() {
     fs.copyFileSync(readmeSrc, path.join(distPluginDir, 'README.md'));
   }
 
-  if (fs.existsSync(path.join(repoRoot, 'work', 'workbench-demo'))) {
-    copyDirClean(distPluginDir, demoPluginDir);
+  let installedDemoDir = null;
+  if (fs.existsSync(demoProjectDir)) {
+    const installed = installWorkspacePlugin(demoProjectDir, { distPluginDir });
+    installedDemoDir = installed.installDir;
   }
 
   process.stderr.write(
     `[workbench build] Built plugin bundle -> ${distPluginDir}\n` +
-      `[workbench build] Synced demo plugin -> ${demoPluginDir}\n`
+      (installedDemoDir ? `[workbench build] Installed demo plugin -> ${installedDemoDir}\n` : '')
   );
 }
 

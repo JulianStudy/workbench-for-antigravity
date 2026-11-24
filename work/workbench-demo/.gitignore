@@ -1,2 +1,3 @@
-.workbench/
-.agents/plugins/workbench/
+/.workbench/
+/.agents/plugins/workbench/
+/.agents/plugins/workbench-*/
