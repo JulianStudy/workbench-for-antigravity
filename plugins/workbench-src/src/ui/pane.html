@@ -39,6 +39,12 @@
         font-size: 15px;
         font-weight: 600;
       }
+      .counts-summary {
+        margin-top: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--color-text-primary, #1f1f1f);
+      }
       .badge {
         display: inline-flex;
         align-items: center;
@@ -65,21 +71,17 @@
         color: var(--color-text-danger, #c62828);
         border-color: var(--color-border-danger, rgba(198, 40, 40, 0.35));
       }
-      .badge-stale {
+      .badge-stale,
+      .badge-running {
         background: var(--color-background-warning, rgba(237, 108, 2, 0.14));
         color: var(--color-text-warning, #b25e09);
         border-color: var(--color-border-warning, rgba(237, 108, 2, 0.38));
       }
-      .criterion {
-        margin: 8px 0 6px 0;
-        font-size: 14px;
-        font-weight: 600;
-      }
       .kv {
         display: grid;
-        grid-template-columns: 78px 1fr;
+        grid-template-columns: 74px 1fr;
         gap: 4px 8px;
-        margin-top: 6px;
+        margin-top: 8px;
         font-size: 12px;
       }
       .kv-key {
@@ -93,19 +95,19 @@
         font-size: 12px;
       }
       .actions {
-        margin-top: 12px;
+        margin-top: 10px;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
         gap: 8px;
       }
       button {
-        padding: 6px 12px;
+        padding: 5px 11px;
         border-radius: 6px;
         border: 1px solid var(--color-border-primary, #bdbdbd);
         background: var(--color-background-primary, #ffffff);
         color: var(--color-text-primary, #1f1f1f);
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 500;
         cursor: pointer;
       }
@@ -113,6 +115,10 @@
         background: var(--color-background-inverse, #1f1f1f);
         color: var(--color-text-inverse, #ffffff);
         border-color: var(--color-border-inverse, #1f1f1f);
+      }
+      button.small {
+        padding: 3px 9px;
+        font-size: 12px;
       }
       button:disabled {
         opacity: 0.55;
@@ -122,20 +128,15 @@
         font-size: 11px;
         color: var(--color-text-tertiary, #777777);
       }
-      .section-title {
-        margin: 0 0 8px 0;
-        font-size: 13px;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
       .notice {
         padding: 8px 10px;
         border-radius: 6px;
         font-size: 12px;
-        margin-bottom: 8px;
+      }
+      .notice-info {
+        background: var(--color-background-tertiary, rgba(25, 118, 210, 0.1));
+        color: var(--color-text-primary, #1f1f1f);
+        border: 1px solid var(--color-border-primary, #c5d4e8);
       }
       .notice-warning {
         background: var(--color-background-warning, rgba(237, 108, 2, 0.12));
@@ -147,23 +148,85 @@
         color: var(--color-text-danger, #c62828);
         border: 1px solid var(--color-border-danger, rgba(198, 40, 40, 0.35));
       }
+      .checks-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .check-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .check-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .check-title-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .check-name {
+        font-size: 14px;
+        font-weight: 600;
+        word-break: break-word;
+      }
+      .check-id {
+        font-size: 11px;
+        color: var(--color-text-secondary, #666666);
+      }
+      .check-cmd {
+        padding: 5px 8px;
+        border-radius: 5px;
+        border: 1px solid var(--color-border-secondary, #e0e0e0);
+        background: var(--color-background-primary, #ffffff);
+        word-break: break-all;
+      }
+      .check-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
       .file-list {
-        margin: 6px 0 0 0;
+        margin: 4px 0 0 0;
         padding-left: 18px;
       }
       .file-list li {
         margin: 2px 0;
       }
+      .output-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .output-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--color-text-secondary, #666666);
+      }
       pre.output {
         margin: 0;
-        padding: 10px;
+        padding: 9px 10px;
         border-radius: 6px;
         border: 1px solid var(--color-border-secondary, #e0e0e0);
         background: var(--color-background-primary, #ffffff);
-        max-height: 280px;
+        max-height: 240px;
         overflow: auto;
         white-space: pre-wrap;
         word-break: break-word;
+      }
+      .empty-state {
+        text-align: center;
+        padding: 18px 12px;
+        color: var(--color-text-secondary, #666666);
       }
       .hidden {
         display: none;
@@ -174,61 +237,28 @@
     <div class="stack">
       <section class="card">
         <div class="header">
-          <h1 class="title">Workbench 验收检查</h1>
-          <span id="state-badge" class="badge badge-not_run">连接中</span>
+          <h1 class="title">Workbench 验收清单</h1>
+          <span id="overall-badge" class="badge badge-not_run">连接中</span>
         </div>
-        <div id="criterion-text" class="criterion">1250 分显示为 ¥12.50</div>
+        <div id="counts-summary" class="counts-summary">加载配置中...</div>
         <div class="kv">
           <div class="kv-key">检查目录</div>
           <div id="project-root" class="kv-val mono">加载中...</div>
-          <div class="kv-key">检查命令</div>
-          <div id="check-command" class="kv-val mono">-</div>
           <div class="kv-key">运行时</div>
           <div id="runtime-info" class="kv-val mono">-</div>
         </div>
         <div class="actions">
-          <button id="run-btn" class="primary" type="button" disabled>运行检查</button>
+          <button id="run-all-btn" class="primary" type="button" disabled>全部运行</button>
           <button id="refresh-btn" type="button" disabled>手动刷新</button>
           <span id="poll-hint" class="hint">每 2 秒自动检测文件变化</span>
         </div>
       </section>
 
+      <div id="progress-banner" class="notice notice-info hidden"></div>
       <div id="error-banner" class="notice notice-danger hidden"></div>
+      <div id="skipped-banner" class="notice notice-warning hidden"></div>
 
-      <section class="card">
-        <div class="section-title">
-          <span>上次检查证据</span>
-          <span id="validity-badge" class="badge badge-not_run">暂无记录</span>
-        </div>
-
-        <div id="stale-box" class="notice notice-warning hidden">
-          <div id="stale-reason-text"></div>
-          <ul id="changed-files-list" class="file-list mono"></ul>
-        </div>
-
-        <div id="evidence-kv" class="kv">
-          <div class="kv-key">已保存结果</div>
-          <div id="saved-status" class="kv-val">-</div>
-          <div class="kv-key">当前有效性</div>
-          <div id="validity-text" class="kv-val">-</div>
-          <div class="kv-key">退出码</div>
-          <div id="exit-code" class="kv-val mono">-</div>
-          <div class="kv-key">检查时间</div>
-          <div id="checked-at" class="kv-val mono">-</div>
-          <div class="kv-key">耗时</div>
-          <div id="duration-ms" class="kv-val mono">-</div>
-          <div class="kv-key">记录目录</div>
-          <div id="recorded-root" class="kv-val mono">-</div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="section-title">
-          <span>检查输出</span>
-          <span id="output-meta" class="hint"></span>
-        </div>
-        <pre id="check-output" class="output mono">尚未运行检查</pre>
-      </section>
+      <div id="checks-list" class="checks-list"></div>
     </div>
     <!-- WORKBENCH_INLINE_SCRIPT -->
   </body>

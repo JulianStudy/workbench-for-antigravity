@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -8,10 +9,29 @@ import {
   RESOURCE_MIME_TYPE,
 } from '@modelcontextprotocol/ext-apps/server';
 import { resolveProjectRootFromPluginDir, validateRootBinding } from './root.mjs';
-import { ACCEPTANCE_CRITERION, createCheckRunner } from './check.mjs';
+import { createWorkbenchRunner } from './check.mjs';
 
 export const WORKBENCH_UI_URI = 'ui://workbench/pane.html';
 export const DEFAULT_ENTRY_TITLE = 'Workbench';
+
+const STATE_LABELS = {
+  not_run: '未运行',
+  passed: '通过',
+  failed: '失败',
+  stale: '已过期',
+  error: '执行错误',
+};
+
+function zeroCounts() {
+  return {
+    total: 0,
+    not_run: 0,
+    passed: 0,
+    failed: 0,
+    stale: 0,
+    error: 0,
+  };
+}
 
 export function parseServerArgs(argv = []) {
   let expectedRoot = null;
@@ -68,35 +88,49 @@ export function resolveRuntimeContext(pluginDir, { expectedRoot } = {}) {
 }
 
 function summarizeStatusText(snapshot) {
-  if (!snapshot.ok) {
+  if (!snapshot.ok && snapshot.rootError) {
     return `Workbench 错误: ${snapshot.rootError}`;
   }
-  const stateMap = {
-    not_run: '未运行',
-    passed: '通过',
-    failed: '失败',
-    stale: '已过期',
-    error: '执行错误',
-  };
-  const label = stateMap[snapshot.effectiveState] || snapshot.effectiveState;
+  if (!snapshot.configOk) {
+    return `Workbench 配置错误: ${snapshot.configError || snapshot.error || 'workbench.json 无效'} | 目录: ${snapshot.projectRoot || '-'}`;
+  }
+  if (!snapshot.ok && snapshot.error) {
+    return `Workbench 错误: ${snapshot.error} | 目录: ${snapshot.projectRoot || '-'}`;
+  }
+
+  const counts = snapshot.counts || zeroCounts();
   const parts = [
-    `Workbench 状态: ${label}`,
+    `Workbench 状态: 共 ${counts.total} 项 (通过 ${counts.passed} / 失败 ${counts.failed} / 过期 ${counts.stale} / 未运行 ${counts.not_run} / 错误 ${counts.error})`,
     `检查目录: ${snapshot.projectRoot}`,
-    `验收条件: ${snapshot.criterion}`,
   ];
   if (snapshot.busy) {
     parts.push('提示: 已有检查正在运行中');
+  } else if (snapshot.isRunning) {
+    parts.push(
+      snapshot.runningBatch
+        ? `批量运行中: ${snapshot.runningCheckId || ''}`
+        : `正在运行: ${snapshot.runningCheckId || ''}`
+    );
   }
-  if (snapshot.changedFiles?.length) {
-    parts.push(`变动文件: ${snapshot.changedFiles.join(', ')}`);
-  }
-  if (snapshot.lastRun) {
-    parts.push(`上次结果: ${stateMap[snapshot.lastRun.status] || snapshot.lastRun.status} (退出码 ${snapshot.lastRun.exitCode ?? '无'})`);
+  if (snapshot.skippedChecks?.length) {
+    parts.push(`已跳过 ${snapshot.skippedChecks.length} 项变更配置`);
   }
   if (snapshot.persistenceError) {
     parts.push(`持久化提示: ${snapshot.persistenceError}`);
   }
   return parts.join(' | ');
+}
+
+function summarizeCheckDetailText(snapshot) {
+  if (!snapshot.ok) {
+    return `Workbench 检查详情错误: ${snapshot.rootError || snapshot.error || snapshot.configError}`;
+  }
+  const c = snapshot.check;
+  if (!c) {
+    return 'Workbench 检查详情: 无记录';
+  }
+  const label = STATE_LABELS[c.effectiveState] || c.effectiveState;
+  return `检查项 ${c.id} (${c.name}): ${label}`;
 }
 
 export function createWorkbenchServer({
@@ -114,7 +148,7 @@ export function createWorkbenchServer({
   const resolvedEntryTitle =
     typeof entryTitle === 'string' && entryTitle.trim() ? entryTitle.trim() : DEFAULT_ENTRY_TITLE;
   const runner = runtimeCtx.ok
-    ? createCheckRunner({ projectRoot: runtimeCtx.projectRoot })
+    ? createWorkbenchRunner({ projectRoot: runtimeCtx.projectRoot })
     : null;
 
   const resolvedHtmlPath = () => process.env.WORKBENCH_PANE_HTML || paneHtmlPath;
@@ -153,17 +187,29 @@ export function createWorkbenchServer({
 
   const buildErrorSnapshot = (extra = {}) => ({
     ok: false,
+    configOk: false,
+    configError: null,
     projectRoot: null,
     pluginDir: runtimeCtx.pluginDir,
     rootError: runtimeCtx.rootError,
-    criterion: ACCEPTANCE_CRITERION,
     effectiveState: 'error',
+    checks: [],
+    counts: zeroCounts(),
     isRunning: false,
-    isValid: false,
-    staleReason: null,
-    changedFiles: [],
-    lastRun: null,
+    runningCheckId: null,
+    runningBatch: false,
     persistenceError: null,
+    skippedChecks: [],
+    nodeVersion: process.version,
+    execPath: process.execPath,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  });
+
+  const withRuntimeMeta = (payload, extra = {}) => ({
+    ...payload,
+    pluginDir: runtimeCtx.pluginDir,
+    rootError: null,
     nodeVersion: process.version,
     execPath: process.execPath,
     timestamp: new Date().toISOString(),
@@ -174,15 +220,7 @@ export function createWorkbenchServer({
     if (!runner) {
       return buildErrorSnapshot(extra);
     }
-    return {
-      ...runner.getStatus(),
-      pluginDir: runtimeCtx.pluginDir,
-      rootError: null,
-      nodeVersion: process.version,
-      execPath: process.execPath,
-      timestamp: new Date().toISOString(),
-      ...extra,
-    };
+    return withRuntimeMeta(runner.getStatus(), extra);
   };
 
   registerAppTool(
@@ -219,14 +257,34 @@ export function createWorkbenchServer({
     'workbench_get_status',
     {
       title: 'Workbench Get Status',
-      description: 'Read persisted last-run evidence and evaluate current staleness.',
+      description:
+        'Read configured acceptance checks, persisted evidence, and staleness. Omit id for lightweight summary list; pass id for full check output.',
+      inputSchema: {
+        id: z.string().min(1).optional(),
+      },
       _meta: {
         ui: {
           visibility: ['app'],
         },
       },
     },
-    async () => {
+    async (args = {}) => {
+      if (!runner) {
+        const snapshot = buildErrorSnapshot();
+        return {
+          content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
+          structuredContent: snapshot,
+        };
+      }
+
+      if (args?.id) {
+        const detail = withRuntimeMeta(runner.getStatus({ id: args.id }));
+        return {
+          content: [{ type: 'text', text: summarizeCheckDetailText(detail) }],
+          structuredContent: detail,
+        };
+      }
+
       const snapshot = getStatusSnapshot();
       return {
         content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
@@ -240,7 +298,40 @@ export function createWorkbenchServer({
     'workbench_run_check',
     {
       title: 'Workbench Run Check',
-      description: 'Run the fixed acceptance check in the project root and persist evidence.',
+      description: 'Run a single configured acceptance check by id and persist evidence.',
+      inputSchema: {
+        id: z.string().min(1),
+      },
+      _meta: {
+        ui: {
+          visibility: ['app'],
+        },
+      },
+    },
+    async ({ id }) => {
+      if (!runner) {
+        const snapshot = buildErrorSnapshot({ busy: false });
+        return {
+          content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
+          structuredContent: snapshot,
+        };
+      }
+      const runResult = await runner.runCheck(id);
+      const snapshot = withRuntimeMeta(runResult);
+      return {
+        content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
+        structuredContent: snapshot,
+      };
+    }
+  );
+
+  registerAppTool(
+    server,
+    'workbench_run_all',
+    {
+      title: 'Workbench Run All',
+      description: 'Run all configured acceptance checks sequentially in config order.',
+      inputSchema: {},
       _meta: {
         ui: {
           visibility: ['app'],
@@ -255,15 +346,8 @@ export function createWorkbenchServer({
           structuredContent: snapshot,
         };
       }
-      const runResult = await runner.runCheck();
-      const snapshot = {
-        ...runResult,
-        pluginDir: runtimeCtx.pluginDir,
-        rootError: null,
-        nodeVersion: process.version,
-        execPath: process.execPath,
-        timestamp: new Date().toISOString(),
-      };
+      const runResult = await runner.runAll();
+      const snapshot = withRuntimeMeta(runResult);
       return {
         content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
         structuredContent: snapshot,
