@@ -3,6 +3,11 @@ import {
   applyDocumentTheme,
   applyHostStyleVariables,
 } from '@modelcontextprotocol/ext-apps';
+import {
+  clearErroredOutputCache,
+  computeChecksRenderSignature,
+  createExpandedOutputLoader,
+} from './pane-state.mjs';
 
 const STATE_LABELS = {
   not_run: '未运行',
@@ -28,9 +33,9 @@ const checksListEl = document.getElementById('checks-list');
 let isConnected = false;
 let pollInFlight = false;
 let runInFlight = false;
-let detailFetchInFlight = false;
 let snapshotVersion = 0;
 let lastSnapshot = null;
+let lastChecksRenderSignature = null;
 let transientActionError = null;
 
 // Track which check IDs currently have output expanded, plus cached output per check ID.
@@ -327,6 +332,18 @@ function buildCheckCard(check) {
 }
 
 function renderChecksList(data) {
+  const sig = computeChecksRenderSignature({
+    data,
+    isConnected,
+    busy: isWorkspaceBusy(),
+    expandedCheckIds,
+    outputCache,
+  });
+  if (sig === lastChecksRenderSignature) {
+    return;
+  }
+  lastChecksRenderSignature = sig;
+
   checksListEl.innerHTML = '';
 
   if (!data || data.ok === false || data.configOk === false) {
@@ -412,91 +429,31 @@ function renderSnapshot(data) {
   syncTopButtons();
 
   // Trigger sequential lazy refresh for any expanded checks whose finishedAt changed
-  refreshExpandedOutputs();
-}
-
-async function refreshExpandedOutputs() {
-  if (!isConnected || detailFetchInFlight || !lastSnapshot?.checks) return;
-
-  const staleExpanded = [];
-  for (const id of expandedCheckIds) {
-    const check = lastSnapshot.checks.find((c) => c.id === id);
-    if (!check || !check.lastRun) continue;
-    const cached = outputCache.get(id);
-    if (!cached || (cached.finishedAt !== check.lastRun.finishedAt && !cached.loading)) {
-      staleExpanded.push(check);
-    }
-  }
-
-  if (staleExpanded.length === 0) return;
-
-  detailFetchInFlight = true;
-  try {
-    for (const check of staleExpanded) {
-      if (!expandedCheckIds.has(check.id)) continue;
-      outputCache.set(check.id, {
-        finishedAt: check.lastRun.finishedAt,
-        output: outputCache.get(check.id)?.output || '',
-        outputTruncated: Boolean(check.lastRun.outputTruncated),
-        loading: true,
-        error: null,
-      });
-      renderChecksList(lastSnapshot);
-
-      try {
-        const res = await app.callServerTool({
-          name: 'workbench_get_status',
-          arguments: { id: check.id },
-        });
-        const detail = res?.structuredContent;
-        if (detail?.ok && detail.check?.lastRun) {
-          outputCache.set(check.id, {
-            finishedAt: detail.check.lastRun.finishedAt,
-            output: detail.check.lastRun.output || '',
-            outputTruncated: Boolean(detail.check.lastRun.outputTruncated),
-            loading: false,
-            error: null,
-          });
-        } else {
-          outputCache.set(check.id, {
-            finishedAt: check.lastRun.finishedAt,
-            output: '',
-            outputTruncated: false,
-            loading: false,
-            error: detail?.error || '未能获取检查输出',
-          });
-        }
-      } catch (err) {
-        outputCache.set(check.id, {
-          finishedAt: check.lastRun.finishedAt,
-          output: '',
-          outputTruncated: false,
-          loading: false,
-          error: err?.message || String(err),
-        });
-      }
-
-      if (lastSnapshot) {
-        renderChecksList(lastSnapshot);
-      }
-    }
-  } finally {
-    detailFetchInFlight = false;
-  }
-}
-
-function toggleCheckOutput(id) {
-  if (expandedCheckIds.has(id)) {
-    expandedCheckIds.delete(id);
-    if (lastSnapshot) renderChecksList(lastSnapshot);
-    return;
-  }
-  expandedCheckIds.add(id);
-  if (lastSnapshot) renderChecksList(lastSnapshot);
-  refreshExpandedOutputs();
+  void expandedOutputLoader.drain();
 }
 
 const app = new App({ name: 'Workbench', version: '0.1.0' }, {});
+
+const expandedOutputLoader = createExpandedOutputLoader({
+  getChecks: () => lastSnapshot?.checks || [],
+  expandedCheckIds,
+  outputCache,
+  canFetch: () => isConnected,
+  fetchDetail: async (id) => {
+    const res = await app.callServerTool({
+      name: 'workbench_get_status',
+      arguments: { id },
+    });
+    return res?.structuredContent;
+  },
+  onStateChange: () => {
+    if (lastSnapshot) renderChecksList(lastSnapshot);
+  },
+});
+
+function toggleCheckOutput(id) {
+  expandedOutputLoader.toggle(id);
+}
 
 // Register all handlers BEFORE app.connect() so no initial host event is missed.
 app.ontoolinput = () => {
@@ -528,7 +485,10 @@ async function refreshStatus({ manual = false } = {}) {
       arguments: {},
     });
     if (res?.structuredContent && myVersion === snapshotVersion) {
-      if (manual) transientActionError = null;
+      if (manual) {
+        transientActionError = null;
+        clearErroredOutputCache(outputCache);
+      }
       renderSnapshot(res.structuredContent);
       pollHintEl.textContent = `每 2 秒自动检测 · 上次刷新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
     }
@@ -638,6 +598,9 @@ async function init() {
 
     if (!lastSnapshot) {
       await refreshStatus();
+    } else {
+      renderChecksList(lastSnapshot);
+      void expandedOutputLoader.drain();
     }
 
     setInterval(() => {
