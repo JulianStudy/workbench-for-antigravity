@@ -1,0 +1,8 @@
+.DS_Store
+.tools/
+node_modules/
+/dist/
+.workbench/
+/work/workbench-demo-copy/
+.env
+.env.*

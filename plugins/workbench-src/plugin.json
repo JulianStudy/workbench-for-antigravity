@@ -1,0 +1,6 @@
+{
+  "name": "workbench",
+  "displayName": "Workbench",
+  "description": "Local acceptance check sidebar for running a fixed project test and tracking staleness against source changes.",
+  "version": "0.1.0"
+}
