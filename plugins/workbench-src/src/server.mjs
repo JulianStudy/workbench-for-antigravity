@@ -8,6 +8,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from '@modelcontextprotocol/ext-apps/server';
 import { resolveProjectRootFromPluginDir } from './root.mjs';
+import { ACCEPTANCE_CRITERION, createCheckRunner } from './check.mjs';
 
 export const WORKBENCH_UI_URI = 'ui://workbench/pane.html';
 
@@ -30,11 +31,48 @@ export function resolveRuntimeContext(pluginDir) {
   }
 }
 
+function summarizeStatusText(snapshot) {
+  if (!snapshot.ok) {
+    return `Workbench 错误: ${snapshot.rootError}`;
+  }
+  const stateMap = {
+    not_run: '未运行',
+    passed: '通过',
+    failed: '失败',
+    stale: '已过期',
+    error: '执行错误',
+  };
+  const label = stateMap[snapshot.effectiveState] || snapshot.effectiveState;
+  const parts = [
+    `Workbench 状态: ${label}`,
+    `检查目录: ${snapshot.projectRoot}`,
+    `验收条件: ${snapshot.criterion}`,
+  ];
+  if (snapshot.busy) {
+    parts.push('提示: 已有检查正在运行中');
+  }
+  if (snapshot.changedFiles?.length) {
+    parts.push(`变动文件: ${snapshot.changedFiles.join(', ')}`);
+  }
+  if (snapshot.lastRun) {
+    parts.push(`上次结果: ${stateMap[snapshot.lastRun.status] || snapshot.lastRun.status} (退出码 ${snapshot.lastRun.exitCode ?? '无'})`);
+  }
+  if (snapshot.persistenceError) {
+    parts.push(`持久化提示: ${snapshot.persistenceError}`);
+  }
+  return parts.join(' | ');
+}
+
 export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
   const server = new McpServer({
     name: 'workbench',
     version: '0.1.0',
   });
+
+  const runtimeCtx = resolveRuntimeContext(pluginDir);
+  const runner = runtimeCtx.ok
+    ? createCheckRunner({ projectRoot: runtimeCtx.projectRoot })
+    : null;
 
   const resolvedHtmlPath = () => process.env.WORKBENCH_PANE_HTML || paneHtmlPath;
 
@@ -70,13 +108,33 @@ export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
     }
   );
 
-  const buildSnapshot = (extra = {}) => {
-    const ctx = resolveRuntimeContext(pluginDir);
+  const buildErrorSnapshot = (extra = {}) => ({
+    ok: false,
+    projectRoot: null,
+    pluginDir: runtimeCtx.pluginDir,
+    rootError: runtimeCtx.rootError,
+    criterion: ACCEPTANCE_CRITERION,
+    effectiveState: 'error',
+    isRunning: false,
+    isValid: false,
+    staleReason: null,
+    changedFiles: [],
+    lastRun: null,
+    persistenceError: null,
+    nodeVersion: process.version,
+    execPath: process.execPath,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  });
+
+  const getStatusSnapshot = (extra = {}) => {
+    if (!runner) {
+      return buildErrorSnapshot(extra);
+    }
     return {
-      ok: ctx.ok,
-      projectRoot: ctx.projectRoot,
-      pluginDir: ctx.pluginDir,
-      rootError: ctx.rootError,
+      ...runner.getStatus(),
+      pluginDir: runtimeCtx.pluginDir,
+      rootError: null,
       nodeVersion: process.version,
       execPath: process.execPath,
       timestamp: new Date().toISOString(),
@@ -105,12 +163,66 @@ export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
       },
     },
     async () => {
-      const snapshot = buildSnapshot({ phase: 1 });
-      const text = snapshot.ok
-        ? `Workbench connected. Project root: ${snapshot.projectRoot} (Node ${snapshot.nodeVersion})`
-        : `Workbench root error: ${snapshot.rootError}`;
+      const snapshot = getStatusSnapshot();
       return {
-        content: [{ type: 'text', text }],
+        content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
+        structuredContent: snapshot,
+      };
+    }
+  );
+
+  registerAppTool(
+    server,
+    'workbench_get_status',
+    {
+      title: 'Workbench Get Status',
+      description: 'Read persisted last-run evidence and evaluate current staleness.',
+      _meta: {
+        ui: {
+          visibility: ['app'],
+        },
+      },
+    },
+    async () => {
+      const snapshot = getStatusSnapshot();
+      return {
+        content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
+        structuredContent: snapshot,
+      };
+    }
+  );
+
+  registerAppTool(
+    server,
+    'workbench_run_check',
+    {
+      title: 'Workbench Run Check',
+      description: 'Run the fixed acceptance check in the project root and persist evidence.',
+      _meta: {
+        ui: {
+          visibility: ['app'],
+        },
+      },
+    },
+    async () => {
+      if (!runner) {
+        const snapshot = buildErrorSnapshot({ busy: false });
+        return {
+          content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
+          structuredContent: snapshot,
+        };
+      }
+      const runResult = await runner.runCheck();
+      const snapshot = {
+        ...runResult,
+        pluginDir: runtimeCtx.pluginDir,
+        rootError: null,
+        nodeVersion: process.version,
+        execPath: process.execPath,
+        timestamp: new Date().toISOString(),
+      };
+      return {
+        content: [{ type: 'text', text: summarizeStatusText(snapshot) }],
         structuredContent: snapshot,
       };
     }
@@ -129,9 +241,7 @@ export function createWorkbenchServer({ pluginDir, paneHtmlPath }) {
       },
     },
     async () => {
-      const payload = buildSnapshot({
-        pong: 'workbench-ok',
-      });
+      const payload = getStatusSnapshot({ pong: 'workbench-ok' });
       const text = payload.ok
         ? `pong: ${payload.pong} | root: ${payload.projectRoot} | node: ${payload.nodeVersion}`
         : `pong error: ${payload.rootError}`;
@@ -159,7 +269,6 @@ async function main() {
   process.stderr.write(`[workbench] MCP server started (pluginDir=${pluginDir}, node=${process.version})\n`);
 }
 
-// Only auto-start when executed directly (CJS bundle entrypoint).
 if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) {
   main().catch((err) => {
     process.stderr.write(`[workbench] Fatal startup error: ${err?.stack || err}\n`);
