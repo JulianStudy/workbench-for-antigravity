@@ -4,6 +4,10 @@ import {
   applyHostStyleVariables,
 } from '@modelcontextprotocol/ext-apps';
 import {
+  MAX_FAILURE_EVIDENCE_BYTES,
+  attachFailureEvidenceContext,
+  buildFailureEvidencePreview,
+  canAttachFailureEvidence,
   clearErroredOutputCache,
   computeChecksRenderSignature,
   createExpandedOutputLoader,
@@ -33,14 +37,19 @@ const checksListEl = document.getElementById('checks-list');
 let isConnected = false;
 let pollInFlight = false;
 let runInFlight = false;
+let attachInFlight = false;
+let attachInFlightCheckId = null;
 let snapshotVersion = 0;
 let lastSnapshot = null;
 let lastChecksRenderSignature = null;
 let transientActionError = null;
+let lastAttachedEvidence = null;
 
-// Track which check IDs currently have output expanded, plus cached output per check ID.
+// Track which check IDs currently have output expanded or failure preview open, plus cached output per check ID.
 const expandedCheckIds = new Set();
+const previewCheckIds = new Set();
 const outputCache = new Map(); // id -> { finishedAt, output, outputTruncated, loading, error }
+const attachFeedbackByCheckId = new Map(); // id -> { type: 'success' | 'error' | 'info', message }
 
 function applyContext(ctx) {
   if (!ctx) return;
@@ -147,6 +156,131 @@ function getStaleReasonDescription(reason) {
   return '当前文件与上次检查记录不一致：检测到以下受跟踪文件已改动或缺失（下方保留上次检查证据）。';
 }
 
+function buildFailureEvidencePanel(check) {
+  const panel = document.createElement('div');
+  panel.className = 'evidence-panel';
+
+  const eligible = canAttachFailureEvidence(check);
+  const cached = outputCache.get(check.id);
+  const isOutputReady = Boolean(
+    check.lastRun &&
+      cached &&
+      !cached.loading &&
+      !cached.error &&
+      cached.finishedAt === check.lastRun.finishedAt
+  );
+  const isAttachingThis = attachInFlight && attachInFlightCheckId === check.id;
+
+  const header = document.createElement('div');
+  header.className = 'evidence-header';
+  const titleSpan = document.createElement('span');
+  titleSpan.textContent = '失败证据预览';
+  const metaSpan = document.createElement('span');
+  metaSpan.className = 'evidence-meta';
+
+  let preview = null;
+  if (!eligible) {
+    metaSpan.textContent = '当前不可附加';
+  } else if (cached?.error) {
+    metaSpan.textContent = '加载失败';
+  } else if (!isOutputReady) {
+    metaSpan.textContent = '加载中...';
+  } else {
+    preview = buildFailureEvidencePreview({
+      check,
+      output: cached.output,
+      projectRoot: lastSnapshot?.projectRoot || '',
+    });
+    metaSpan.textContent = `${preview.byteLength} / ${MAX_FAILURE_EVIDENCE_BYTES} 字节${preview.truncated ? ' · 已截断' : ''}`;
+  }
+
+  header.appendChild(titleSpan);
+  header.appendChild(metaSpan);
+  panel.appendChild(header);
+
+  if (!eligible) {
+    const warnBox = document.createElement('div');
+    warnBox.className = 'notice notice-warning';
+    if (check.isRunning) {
+      warnBox.textContent = '检查正在重新运行，完成后请根据最新结果决定是否附加失败证据。';
+    } else if (check.effectiveState === 'stale') {
+      warnBox.textContent = '当前失败证据已过期，无法再附加。请先重新运行检查后再附加。';
+    } else if (check.effectiveState === 'passed') {
+      warnBox.textContent = '该检查项当前已通过，无需附加旧的失败证据。';
+    } else {
+      warnBox.textContent = '该检查项当前不是有效的失败状态，无法附加失败证据。';
+    }
+    panel.appendChild(warnBox);
+  } else if (cached?.error) {
+    const errBox = document.createElement('div');
+    errBox.className = 'notice notice-danger';
+    errBox.textContent = `加载检查输出失败：${cached.error}`;
+    panel.appendChild(errBox);
+  } else if (!isOutputReady) {
+    const pre = document.createElement('pre');
+    pre.className = 'evidence-preview mono';
+    pre.textContent = '正在按需加载失败证据...';
+    panel.appendChild(pre);
+  } else {
+    const pre = document.createElement('pre');
+    pre.className = 'evidence-preview mono';
+    pre.textContent = preview.text;
+    panel.appendChild(pre);
+
+    const explainHint = document.createElement('div');
+    explainHint.className = 'hint';
+    explainHint.textContent = '点击下方确认后仅附加到下一条消息上下文，不会自动发起对话。';
+    panel.appendChild(explainHint);
+
+    if (lastAttachedEvidence) {
+      const replaceWarn = document.createElement('div');
+      replaceWarn.className = 'notice notice-warning';
+      replaceWarn.textContent = `注意：本次附加将替换上一次已附加的失败证据（${lastAttachedEvidence.name} / ${lastAttachedEvidence.id}）。`;
+      panel.appendChild(replaceWarn);
+    }
+  }
+
+  const feedback = attachFeedbackByCheckId.get(check.id);
+  if (feedback?.message) {
+    const feedbackEl = document.createElement('div');
+    if (feedback.type === 'success') {
+      feedbackEl.className = 'notice notice-success';
+    } else if (feedback.type === 'error') {
+      feedbackEl.className = 'notice notice-danger';
+    } else {
+      feedbackEl.className = 'notice notice-info';
+    }
+    feedbackEl.textContent = feedback.message;
+    panel.appendChild(feedbackEl);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'evidence-actions';
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.className = 'small primary';
+  confirmBtn.textContent = isAttachingThis ? '附加中...' : '确认附加到下一条消息';
+  confirmBtn.disabled = !isConnected || attachInFlight || !eligible || !isOutputReady;
+  confirmBtn.addEventListener('click', () => {
+    confirmAttachFailureEvidence(check.id);
+  });
+  actions.appendChild(confirmBtn);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'small';
+  closeBtn.textContent = '关闭预览';
+  closeBtn.disabled = isAttachingThis;
+  closeBtn.addEventListener('click', () => {
+    closeFailureEvidencePreview(check.id);
+  });
+  actions.appendChild(closeBtn);
+
+  panel.appendChild(actions);
+  return panel;
+}
+
 function buildCheckCard(check) {
   const card = document.createElement('section');
   card.className = 'card check-card';
@@ -214,7 +348,30 @@ function buildCheckCard(check) {
     controls.appendChild(toggleBtn);
   }
 
+  if (canAttachFailureEvidence(check)) {
+    const attachPreviewBtn = document.createElement('button');
+    attachPreviewBtn.type = 'button';
+    attachPreviewBtn.className = 'small';
+    attachPreviewBtn.textContent = '附加失败证据';
+    attachPreviewBtn.disabled = !isConnected;
+    attachPreviewBtn.addEventListener('click', () => {
+      toggleFailureEvidencePreview(check.id);
+    });
+    controls.appendChild(attachPreviewBtn);
+  }
+
   card.appendChild(controls);
+
+  if (check.effectiveState === 'stale' && check.lastRun?.status === 'failed') {
+    const staleAttachHint = document.createElement('div');
+    staleAttachHint.className = 'hint';
+    staleAttachHint.textContent = '上次失败证据已过期，请先重新运行检查后再附加。';
+    card.appendChild(staleAttachHint);
+  }
+
+  if (previewCheckIds.has(check.id)) {
+    card.appendChild(buildFailureEvidencePanel(check));
+  }
 
   // Per-check error banner (e.g. symlink escape)
   if (check.checkError) {
@@ -337,7 +494,12 @@ function renderChecksList(data) {
     isConnected,
     busy: isWorkspaceBusy(),
     expandedCheckIds,
+    previewCheckIds,
     outputCache,
+    attachInFlight,
+    attachInFlightCheckId,
+    attachFeedbackByCheckId,
+    lastAttachedEvidence,
   });
   if (sig === lastChecksRenderSignature) {
     return;
@@ -416,19 +578,32 @@ function renderSnapshot(data) {
   // Skipped banner
   renderSkippedBanner(data.skippedChecks);
 
-  // Clean up expanded IDs that no longer exist
-  const currentIds = new Set((data.checks || []).map((c) => c.id));
+  // Clean up expanded / preview IDs that no longer exist, and clear stale attach feedback
+  const checksById = new Map((data.checks || []).map((c) => [c.id, c]));
   for (const id of [...expandedCheckIds]) {
-    if (!currentIds.has(id)) {
+    if (!checksById.has(id)) {
       expandedCheckIds.delete(id);
       outputCache.delete(id);
+    }
+  }
+  for (const id of [...previewCheckIds]) {
+    if (!checksById.has(id)) {
+      previewCheckIds.delete(id);
+      attachFeedbackByCheckId.delete(id);
+      outputCache.delete(id);
+    }
+  }
+  for (const [id, feedback] of [...attachFeedbackByCheckId.entries()]) {
+    const check = checksById.get(id);
+    if (!canAttachFailureEvidence(check) || (feedback.finishedAt && check.lastRun?.finishedAt !== feedback.finishedAt)) {
+      attachFeedbackByCheckId.delete(id);
     }
   }
 
   renderChecksList(data);
   syncTopButtons();
 
-  // Trigger sequential lazy refresh for any expanded checks whose finishedAt changed
+  // Trigger sequential lazy refresh for any expanded/previewed checks whose finishedAt changed
   void expandedOutputLoader.drain();
 }
 
@@ -437,6 +612,7 @@ const app = new App({ name: 'Workbench', version: '0.1.0' }, {});
 const expandedOutputLoader = createExpandedOutputLoader({
   getChecks: () => lastSnapshot?.checks || [],
   expandedCheckIds,
+  previewCheckIds,
   outputCache,
   canFetch: () => isConnected,
   fetchDetail: async (id) => {
@@ -453,6 +629,69 @@ const expandedOutputLoader = createExpandedOutputLoader({
 
 function toggleCheckOutput(id) {
   expandedOutputLoader.toggle(id);
+}
+
+function toggleFailureEvidencePreview(id) {
+  if (previewCheckIds.has(id)) {
+    closeFailureEvidencePreview(id);
+    return;
+  }
+  attachFeedbackByCheckId.delete(id);
+  expandedOutputLoader.openPreview(id);
+}
+
+function closeFailureEvidencePreview(id) {
+  attachFeedbackByCheckId.delete(id);
+  expandedOutputLoader.closePreview(id);
+}
+
+async function confirmAttachFailureEvidence(id) {
+  if (!isConnected || attachInFlight) return;
+  const check = (lastSnapshot?.checks || []).find((c) => c.id === id);
+  if (!canAttachFailureEvidence(check)) {
+    attachFeedbackByCheckId.set(id, {
+      type: 'error',
+      message: '当前检查项不是有效的失败状态，无法附加失败证据。',
+    });
+    if (lastSnapshot) renderChecksList(lastSnapshot);
+    return;
+  }
+
+  const cached = outputCache.get(id);
+  if (!cached || cached.loading || cached.error || cached.finishedAt !== check.lastRun.finishedAt) {
+    return;
+  }
+
+  attachInFlight = true;
+  attachInFlightCheckId = id;
+  if (lastSnapshot) renderChecksList(lastSnapshot);
+
+  try {
+    const res = await attachFailureEvidenceContext({
+      app,
+      check,
+      output: cached.output,
+      projectRoot: lastSnapshot?.projectRoot || '',
+    });
+    if (res.ok && res.attached) {
+      lastAttachedEvidence = res.attached;
+      attachFeedbackByCheckId.set(id, {
+        type: 'success',
+        message: res.message,
+        finishedAt: check.lastRun.finishedAt,
+      });
+    } else {
+      attachFeedbackByCheckId.set(id, {
+        type: 'error',
+        message: res.message,
+        finishedAt: check.lastRun.finishedAt,
+      });
+    }
+  } finally {
+    attachInFlight = false;
+    attachInFlightCheckId = null;
+    if (lastSnapshot) renderChecksList(lastSnapshot);
+  }
 }
 
 // Register all handlers BEFORE app.connect() so no initial host event is missed.

@@ -250,3 +250,112 @@ test('bundled dist/server.cjs disables execution when unbound or when --expected
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 });
+
+test('open_workbench isolates check output across both content and structuredContent even after failing/passing runs with unique markers', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-stdio-iso-'));
+  const sandboxProject = createSandboxProject(tmpBase, 'demo-iso');
+  const UNIQUE_MARKER = 'UNIQUE_OUTPUT_MARKER_ALPHA3_9f8e7d';
+
+  // Inject unique output markers into both test files (and force clean-label to fail)
+  const fmtTestPath = path.join(sandboxProject, 'test', 'format-total.test.mjs');
+  fs.writeFileSync(
+    fmtTestPath,
+    `${fs.readFileSync(fmtTestPath, 'utf8')}\nconsole.log('${UNIQUE_MARKER}_PASS');\n`,
+    'utf8'
+  );
+  const lblTestPath = path.join(sandboxProject, 'test', 'clean-label.test.mjs');
+  fs.writeFileSync(
+    lblTestPath,
+    [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "test('forced failure with unique marker', () => {",
+      `  console.error('${UNIQUE_MARKER}_FAIL');`,
+      `  assert.equal('actual', 'expected_${UNIQUE_MARKER}');`,
+      '});',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  const installed = installWorkspacePlugin(sandboxProject, { distPluginDir });
+  const mcpConfig = JSON.parse(
+    fs.readFileSync(path.join(installed.installDir, 'mcp_config.json'), 'utf8')
+  );
+  const resolvedArgs = mcpConfig.mcpServers.workbench_runner.args.map((arg) =>
+    arg.replace('${PLUGIN_ROOT}', installed.installDir)
+  );
+
+  const client = await connectStdioServer(resolvedArgs);
+  try {
+    // Verify bundled pane.html includes Stage 3 failure evidence preview & explicit attach UI
+    const uiRes = await client.readResource({ uri: 'ui://workbench/pane.html' });
+    const html = uiRes.contents[0]?.text || '';
+    assert.ok(html.includes('evidence-preview'), 'pane.html must include selectable evidence-preview styles');
+    assert.ok(html.includes('buildFailureEvidencePreview'), 'pane.html must bundle failure evidence preview builder');
+    assert.ok(html.includes('attachFailureEvidenceContext'), 'pane.html must bundle explicit updateModelContext helper');
+    assert.ok(html.includes('confirmAttachFailureEvidence'), 'pane.html must bundle explicit confirm attach handler');
+
+    const runAllRes = await client.callTool({ name: 'workbench_run_all', arguments: {} });
+    assert.equal(runAllRes.structuredContent?.counts?.passed, 1);
+    assert.equal(runAllRes.structuredContent?.counts?.failed, 1);
+
+    const openRes = await client.callTool({ name: 'open_workbench', arguments: {} });
+    const openContentJson = JSON.stringify(openRes.content);
+    const openStructuredJson = JSON.stringify(openRes.structuredContent);
+
+    assert.equal(
+      openContentJson.includes(UNIQUE_MARKER),
+      false,
+      'open_workbench content must not contain test output marker'
+    );
+    assert.equal(
+      openStructuredJson.includes(UNIQUE_MARKER),
+      false,
+      'open_workbench structuredContent must not contain test output marker'
+    );
+    assert.equal(
+      openContentJson.includes('1250 分显示为 ¥12.50'),
+      false,
+      'open_workbench content must not contain raw test output lines'
+    );
+    assert.equal(
+      /"output"\s*:/.test(openStructuredJson),
+      false,
+      'open_workbench structuredContent must contain zero output fields'
+    );
+    for (const check of openRes.structuredContent?.checks || []) {
+      assert.equal('output' in (check.lastRun || {}), false);
+    }
+
+    const summaryRes = await client.callTool({ name: 'workbench_get_status', arguments: {} });
+    const summaryJson = JSON.stringify(summaryRes.structuredContent);
+    assert.equal(summaryJson.includes(UNIQUE_MARKER), false);
+    assert.equal(/"output"\s*:/.test(summaryJson), false);
+    for (const check of summaryRes.structuredContent?.checks || []) {
+      assert.equal('output' in (check.lastRun || {}), false);
+    }
+
+    const passDetail = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { id: 'format-total' },
+    });
+    assert.ok(
+      (passDetail.structuredContent?.check?.lastRun?.output || '').includes(`${UNIQUE_MARKER}_PASS`),
+      'workbench_get_status({ id }) must return full output for passing check'
+    );
+
+    const failDetail = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { id: 'clean-label' },
+    });
+    assert.equal(failDetail.structuredContent?.check?.effectiveState, 'failed');
+    assert.ok(
+      (failDetail.structuredContent?.check?.lastRun?.output || '').includes(`${UNIQUE_MARKER}_FAIL`),
+      'workbench_get_status({ id }) must return full output for failing check'
+    );
+  } finally {
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
