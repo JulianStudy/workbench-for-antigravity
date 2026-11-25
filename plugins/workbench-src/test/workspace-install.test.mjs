@@ -112,6 +112,58 @@ test('1. installing same workspace twice is idempotent with deterministic identi
   }
 });
 
+test('reinstalling a bundle with a corrupt manifest preserves the working installation', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-install-corrupt-'));
+  try {
+    const distDir = createFakeDistBundle(tmpBase);
+    const workspaceDir = path.join(tmpBase, 'demo-alpha');
+    fs.mkdirSync(workspaceDir);
+    const { installDir } = installWorkspacePlugin(workspaceDir, { distPluginDir: distDir });
+    const files = ['plugin.json', 'mcp_config.json', 'dist/server.cjs', 'dist/pane.html'];
+    const readInstallation = () =>
+      files.map((file) => fs.readFileSync(path.join(installDir, file), 'utf8'));
+    const original = readInstallation();
+
+    fs.writeFileSync(path.join(distDir, 'dist', 'server.cjs'), '// updated server\n', 'utf8');
+    fs.writeFileSync(path.join(distDir, 'mcp_config.json'), '{', 'utf8');
+
+    assert.throws(() => installWorkspacePlugin(workspaceDir, { distPluginDir: distDir }), SyntaxError);
+    assert.deepEqual(readInstallation(), original);
+    assert.deepEqual(fs.readdirSync(path.dirname(installDir)), [path.basename(installDir)]);
+
+    fs.writeFileSync(path.join(distDir, 'mcp_config.json'), original[1], 'utf8');
+    installWorkspacePlugin(workspaceDir, { distPluginDir: distDir });
+    assert.equal(fs.readFileSync(path.join(installDir, 'dist', 'server.cjs'), 'utf8'), '// updated server\n');
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('a failed final rename restores the previous installation', (t) => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-install-restore-'));
+  try {
+    const distDir = createFakeDistBundle(tmpBase);
+    const workspaceDir = path.join(tmpBase, 'demo-alpha');
+    fs.mkdirSync(workspaceDir);
+    const { installDir } = installWorkspacePlugin(workspaceDir, { distPluginDir: distDir });
+    const serverPath = path.join('dist', 'server.cjs');
+    fs.writeFileSync(path.join(distDir, serverPath), '// updated server\n', 'utf8');
+
+    const rename = fs.renameSync;
+    const installError = new Error('final rename failed');
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (path.basename(from) === 'new' && to === installDir) throw installError;
+      return rename(from, to);
+    });
+
+    assert.throws(() => installWorkspacePlugin(workspaceDir, { distPluginDir: distDir }), installError);
+    assert.equal(fs.readFileSync(path.join(installDir, serverPath), 'utf8'), '// stub server\n');
+    assert.deepEqual(fs.readdirSync(path.dirname(installDir)), [path.basename(installDir)]);
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
 test('2. two distinct workspaces A and B get distinct plugin names and disambiguated displayName / entryTitle', () => {
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-install-distinct-'));
   try {

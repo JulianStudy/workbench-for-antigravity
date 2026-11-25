@@ -26,7 +26,7 @@
 | 跨会话读回 | `workbench-demo` 新建会话重开侧栏，准确读回 `format-total`（`12:05:26`）与 `clean-label`（`11:52:31`）。 |
 | 双工作区隔离 | 切到 `gate2-peer` 打开 `Workbench (gate2-peer · 545f)`，初始「未运行」，「全部运行」后两项通过（`113 ms`、`85 ms`，退出码均 `0`），仅写入 `gate2-peer/.workbench/results.json`（`52c4077f...`）；原 `workbench-demo/.workbench/results.json` 哈希（`2e3ac003...65977`）与修改时间均未变。 |
 
-> **说明**：以上阶段 2 桌面验收在 `work/workbench-demo` 与 `gate2-peer` 完成，尚未在二者之外的第三个真实外部项目里试用。
+以上阶段 2 桌面验收在 `work/workbench-demo` 与 `gate2-peer` 完成。
 
 ### 阶段 3 关卡：失败证据预览与 `app.updateModelContext()` 附加
 
@@ -42,6 +42,11 @@
 - `cd plugins/workbench-src && npm ci && npm run build && npm test`（Node v24.22.3）：**37/37 通过，0 失败**。
 - `agy-node --test test/*.test.mjs`（App 自带 Node v24.22.0）：**37/37 通过，0 失败**。
 - `agy plugin validate <安装目录> --strict`：`work/workbench-demo`（`workbench-701df7f47d07`）与 `work/workbench-demo-copy/gate2-peer`（`workbench-545f1db34d4e`）均退出码 `0`。
+
+### 发布前真实项目试用与重装回归
+
+- 在 Antigravity Network Doctor 的独立副本（提交 `8cd551e`）新增一条验收项。桌面侧栏从 MCP 服务的 `PATH` 找到 `python3`，运行项目的 `python3 -B -m unittest discover -s tests`，**33/33 通过**，退出码 `0`。侧栏检查目录指向独立副本，`.workbench/results.json` 中保存了同一次结果。该副本通过 `agy plugin validate --strict`。
+- 重装会先在临时目录准备新包和清单，准备完成后再替换。新增两条回归测试，分别验证清单损坏时保留原安装、最终替换失败时恢复原安装。修复后 Node v24.22.3 和 App 自带 Node v24.22.0 均 **39/39 通过**。
 
 ---
 

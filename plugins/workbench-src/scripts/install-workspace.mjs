@@ -80,12 +80,45 @@ function assertValidDistBundle(distPluginDir) {
     path.join(distPluginDir, 'dist', 'pane.html'),
   ];
   for (const required of requiredPaths) {
-    if (!fs.existsSync(required)) {
+    if (!fs.lstatSync(required, { throwIfNoEntry: false })?.isFile()) {
       throw new Error(
-        `Built plugin bundle is incomplete (missing ${required}). Run "npm run build" in plugins/workbench-src first.`
+        `Built plugin bundle is incomplete (expected a regular file at ${required}). Run "npm run build" in plugins/workbench-src first.`
       );
     }
   }
+}
+
+function prepareWorkspacePlugin(stagedDir, identity) {
+  const pluginJsonPath = path.join(stagedDir, 'plugin.json');
+  const mcpConfigPath = path.join(stagedDir, 'mcp_config.json');
+  const templatePluginJson = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf8'));
+  const templateMcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
+
+  const pluginJson = {
+    ...templatePluginJson,
+    name: identity.pluginName,
+    displayName: identity.displayName,
+  };
+  const mcpConfig = {
+    ...templateMcpConfig,
+    mcpServers: {
+      ...templateMcpConfig.mcpServers,
+      workbench_runner: {
+        ...templateMcpConfig.mcpServers?.workbench_runner,
+        command: 'node',
+        args: [
+          '${PLUGIN_ROOT}/dist/server.cjs',
+          '--expected-root',
+          identity.realRoot,
+          '--entry-title',
+          identity.entryTitle,
+        ],
+      },
+    },
+  };
+  fs.writeFileSync(pluginJsonPath, `${JSON.stringify(pluginJson, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(mcpConfigPath, `${JSON.stringify(mcpConfig, null, 2)}\n`, 'utf8');
+  return { pluginJson, mcpConfig };
 }
 
 /**
@@ -112,54 +145,45 @@ export function installWorkspacePlugin(
   const pluginsDir = path.join(identity.realRoot, '.agents', 'plugins');
   fs.mkdirSync(pluginsDir, { recursive: true });
 
-  fs.rmSync(identity.installDir, { recursive: true, force: true });
-  fs.cpSync(distPluginDir, identity.installDir, { recursive: true });
+  const stagingRoot = fs.mkdtempSync(path.join(pluginsDir, '.workbench-install-'));
+  const stagedDir = path.join(stagingRoot, 'new');
+  const backupDir = path.join(stagingRoot, 'previous');
+  let keepBackup = false;
+  try {
+    // Finish and verify every file before moving the active installation.
+    fs.cpSync(distPluginDir, stagedDir, { recursive: true });
+    assertValidDistBundle(stagedDir);
+    const manifests = prepareWorkspacePlugin(stagedDir, identity);
 
-  const templatePluginJson = JSON.parse(
-    fs.readFileSync(path.join(distPluginDir, 'plugin.json'), 'utf8')
-  );
-  const generatedPluginJson = {
-    ...templatePluginJson,
-    name: identity.pluginName,
-    displayName: identity.displayName,
-  };
-  fs.writeFileSync(
-    path.join(identity.installDir, 'plugin.json'),
-    `${JSON.stringify(generatedPluginJson, null, 2)}\n`,
-    'utf8'
-  );
+    let hasBackup = false;
+    try {
+      fs.renameSync(identity.installDir, backupDir);
+      hasBackup = true;
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
 
-  const templateMcpConfig = JSON.parse(
-    fs.readFileSync(path.join(distPluginDir, 'mcp_config.json'), 'utf8')
-  );
-  const generatedMcpConfig = {
-    ...templateMcpConfig,
-    mcpServers: {
-      ...(templateMcpConfig.mcpServers || {}),
-      workbench_runner: {
-        ...(templateMcpConfig.mcpServers?.workbench_runner || {}),
-        command: 'node',
-        args: [
-          '${PLUGIN_ROOT}/dist/server.cjs',
-          '--expected-root',
-          identity.realRoot,
-          '--entry-title',
-          identity.entryTitle,
-        ],
-      },
-    },
-  };
-  fs.writeFileSync(
-    path.join(identity.installDir, 'mcp_config.json'),
-    `${JSON.stringify(generatedMcpConfig, null, 2)}\n`,
-    'utf8'
-  );
+    try {
+      fs.renameSync(stagedDir, identity.installDir);
+    } catch (installError) {
+      if (hasBackup) {
+        try {
+          fs.renameSync(backupDir, identity.installDir);
+        } catch (restoreError) {
+          keepBackup = true;
+          throw new AggregateError(
+            [installError, restoreError],
+            `Could not replace or restore Workbench. The previous installation is at ${backupDir}.`
+          );
+        }
+      }
+      throw installError;
+    }
 
-  return {
-    ...identity,
-    pluginJson: generatedPluginJson,
-    mcpConfig: generatedMcpConfig,
-  };
+    return { ...identity, ...manifests };
+  } finally {
+    if (!keepBackup) fs.rmSync(stagingRoot, { recursive: true, force: true });
+  }
 }
 
 function isDirectCliInvocation() {
