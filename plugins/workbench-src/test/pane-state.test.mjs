@@ -12,6 +12,7 @@ import {
   computeChecksRenderSignature,
   createExpandedOutputLoader,
   redactWorkspacePaths,
+  shouldShowReplaceEvidenceWarning,
   truncateUtf8TextToBudget,
   utf8ByteLength,
 } from '../src/ui/pane-state.mjs';
@@ -779,6 +780,94 @@ test('createExpandedOutputLoader fetches output on demand when previewCheckIds i
   assert.deepEqual(fetched, ['format-total']);
   assert.equal(outputCache.get('format-total')?.output, 'preview failure detail output');
   assert.equal(outputCache.get('format-total')?.loading, false);
+});
+
+test('shouldShowReplaceEvidenceWarning suppresses warning only when the exact check run just succeeded attaching', () => {
+  const check = {
+    id: 'format-total',
+    name: '1250 分显示为 ¥12.50',
+    lastRun: {
+      finishedAt: '2026-11-24T09:59:00.000Z',
+    },
+  };
+  const attachedSameRun = {
+    id: 'format-total',
+    name: '1250 分显示为 ¥12.50',
+    finishedAt: '2026-11-24T09:59:00.000Z',
+    attachedAt: '2026-11-24T10:00:00.000Z',
+  };
+  const successFeedback = {
+    type: 'success',
+    message: '已附加失败证据',
+    finishedAt: '2026-11-24T09:59:00.000Z',
+  };
+
+  // No previously attached evidence -> never show replace warning
+  assert.equal(
+    shouldShowReplaceEvidenceWarning({
+      check,
+      lastAttachedEvidence: null,
+      feedback: null,
+    }),
+    false
+  );
+
+  // Immediately after attaching this exact check run (green confirmation visible) -> suppress replace warning
+  assert.equal(
+    shouldShowReplaceEvidenceWarning({
+      check,
+      lastAttachedEvidence: attachedSameRun,
+      feedback: successFeedback,
+    }),
+    false
+  );
+
+  // Previewing a different check while another check is attached -> show replace warning
+  assert.equal(
+    shouldShowReplaceEvidenceWarning({
+      check: {
+        id: 'clean-label',
+        name: '去除标签首尾空格',
+        lastRun: { finishedAt: '2026-11-24T09:59:01.000Z' },
+      },
+      lastAttachedEvidence: attachedSameRun,
+      feedback: null,
+    }),
+    true
+  );
+
+  // Previewing a newer failed run of the same check -> show replace warning
+  assert.equal(
+    shouldShowReplaceEvidenceWarning({
+      check: {
+        ...check,
+        lastRun: { finishedAt: '2026-11-24T10:05:00.000Z' },
+      },
+      lastAttachedEvidence: attachedSameRun,
+      feedback: successFeedback,
+    }),
+    true
+  );
+
+  // Re-opening preview after closing it (feedback cleared) -> show replace warning
+  assert.equal(
+    shouldShowReplaceEvidenceWarning({
+      check,
+      lastAttachedEvidence: attachedSameRun,
+      feedback: null,
+    }),
+    true
+  );
+
+  // Non-success feedback (e.g. retry error on the same check) -> show replace warning
+  assert.equal(
+    shouldShowReplaceEvidenceWarning({
+      check,
+      lastAttachedEvidence: attachedSameRun,
+      feedback: { type: 'error', message: '附加失败' },
+    }),
+    true
+  );
 });
 
 test('UI modules stay browser-compatible (no Buffer or node:* imports) and never call sendMessage', () => {

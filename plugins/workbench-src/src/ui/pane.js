@@ -11,6 +11,7 @@ import {
   clearErroredOutputCache,
   computeChecksRenderSignature,
   createExpandedOutputLoader,
+  shouldShowReplaceEvidenceWarning,
 } from './pane-state.mjs';
 
 const STATE_LABELS = {
@@ -162,6 +163,7 @@ function buildFailureEvidencePanel(check) {
 
   const eligible = canAttachFailureEvidence(check);
   const cached = outputCache.get(check.id);
+  const feedback = attachFeedbackByCheckId.get(check.id);
   const isOutputReady = Boolean(
     check.lastRun &&
       cached &&
@@ -232,7 +234,7 @@ function buildFailureEvidencePanel(check) {
     explainHint.textContent = '点击下方确认后仅附加到下一条消息上下文，不会自动发起对话。';
     panel.appendChild(explainHint);
 
-    if (lastAttachedEvidence) {
+    if (shouldShowReplaceEvidenceWarning({ check, lastAttachedEvidence, feedback })) {
       const replaceWarn = document.createElement('div');
       replaceWarn.className = 'notice notice-warning';
       replaceWarn.textContent = `注意：本次附加将替换上一次已附加的失败证据（${lastAttachedEvidence.name} / ${lastAttachedEvidence.id}）。`;
@@ -240,7 +242,6 @@ function buildFailureEvidencePanel(check) {
     }
   }
 
-  const feedback = attachFeedbackByCheckId.get(check.id);
   if (feedback?.message) {
     const feedbackEl = document.createElement('div');
     if (feedback.type === 'success') {

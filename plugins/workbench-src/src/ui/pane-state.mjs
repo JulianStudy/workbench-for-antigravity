@@ -51,6 +51,31 @@ export function canAttachFailureEvidence(check) {
   );
 }
 
+/**
+ * Determine whether to show the "this attach will replace previously attached evidence"
+ * warning in the preview panel. Suppresses the warning only while the green attach
+ * confirmation for the exact same check run is currently displayed.
+ */
+export function shouldShowReplaceEvidenceWarning({
+  check,
+  lastAttachedEvidence,
+  feedback,
+}) {
+  if (!lastAttachedEvidence) {
+    return false;
+  }
+  if (
+    feedback?.type === 'success' &&
+    Boolean(check?.id) &&
+    lastAttachedEvidence.id === check.id &&
+    Boolean(check?.lastRun?.finishedAt) &&
+    lastAttachedEvidence.finishedAt === check.lastRun.finishedAt
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function redactWorkspacePaths(text, projectRoot) {
   let result = String(text ?? '');
   if (!result || !projectRoot || typeof projectRoot !== 'string') {
