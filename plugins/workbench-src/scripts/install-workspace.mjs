@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { compileFunction, Script } from 'node:vm';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,11 +89,53 @@ function assertValidDistBundle(distPluginDir) {
   }
 }
 
+function validateStagedAssets(stagedDir) {
+  const serverPath = path.join(stagedDir, 'dist', 'server.cjs');
+  const serverSource = fs.readFileSync(serverPath, 'utf8');
+  if (!serverSource.trim()) throw new Error('Staged dist/server.cjs is empty.');
+  try {
+    // Parse the CommonJS bundle without executing it.
+    compileFunction(serverSource, ['exports', 'require', 'module', '__filename', '__dirname'], {
+      filename: serverPath,
+    });
+  } catch (error) {
+    throw new Error(`Staged dist/server.cjs is invalid: ${error.message}`, { cause: error });
+  }
+
+  const panePath = path.join(stagedDir, 'dist', 'pane.html');
+  const paneHtml = fs.readFileSync(panePath, 'utf8');
+  // The build embeds one script at the end of the pane document.
+  const inlineScript = /<script>([\s\S]*?)<\/script>\s*<\/body>\s*<\/html>\s*$/i.exec(paneHtml)?.[1];
+  if (!inlineScript?.trim()) throw new Error('Staged dist/pane.html has an incomplete inline script.');
+  try {
+    new Script(inlineScript, { filename: panePath });
+  } catch (error) {
+    throw new Error(`Staged dist/pane.html script is invalid: ${error.message}`, { cause: error });
+  }
+}
+
+function isJsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function prepareWorkspacePlugin(stagedDir, identity) {
   const pluginJsonPath = path.join(stagedDir, 'plugin.json');
   const mcpConfigPath = path.join(stagedDir, 'mcp_config.json');
   const templatePluginJson = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf8'));
   const templateMcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
+  const version = templatePluginJson?.version;
+  if (!isJsonObject(templatePluginJson) || typeof version !== 'string' || !version.trim()) {
+    throw new Error('Staged plugin.json must include a non-empty version.');
+  }
+  const mcpServers = templateMcpConfig?.mcpServers;
+  const templateRunner = mcpServers?.workbench_runner;
+  if (!isJsonObject(mcpServers) || !isJsonObject(templateRunner)) {
+    throw new Error('Staged mcp_config.json must define mcpServers.workbench_runner.');
+  }
+  const { env } = templateRunner;
+  if (env !== undefined && (!isJsonObject(env) || Object.values(env).some((value) => typeof value !== 'string'))) {
+    throw new Error('Staged mcp_config.json runner env must map names to strings.');
+  }
 
   const pluginJson = {
     ...templatePluginJson,
@@ -102,9 +145,9 @@ function prepareWorkspacePlugin(stagedDir, identity) {
   const mcpConfig = {
     ...templateMcpConfig,
     mcpServers: {
-      ...templateMcpConfig.mcpServers,
+      ...mcpServers,
       workbench_runner: {
-        ...templateMcpConfig.mcpServers?.workbench_runner,
+        ...templateRunner,
         command: 'node',
         args: [
           '${PLUGIN_ROOT}/dist/server.cjs',
@@ -153,6 +196,7 @@ export function installWorkspacePlugin(
     // Finish and verify every file before moving the active installation.
     fs.cpSync(distPluginDir, stagedDir, { recursive: true });
     assertValidDistBundle(stagedDir);
+    validateStagedAssets(stagedDir);
     const manifests = prepareWorkspacePlugin(stagedDir, identity);
 
     let hasBackup = false;

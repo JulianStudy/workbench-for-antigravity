@@ -51,7 +51,11 @@ function createFakeDistBundle(baseDir) {
     'utf8'
   );
   fs.writeFileSync(path.join(distDir, 'dist', 'server.cjs'), '// stub server\n', 'utf8');
-  fs.writeFileSync(path.join(distDir, 'dist', 'pane.html'), '<html></html>\n', 'utf8');
+  fs.writeFileSync(
+    path.join(distDir, 'dist', 'pane.html'),
+    '<html><body><script>void 0;</script></body></html>\n',
+    'utf8'
+  );
   return distDir;
 }
 
@@ -159,6 +163,71 @@ test('a failed final rename restores the previous installation', (t) => {
     assert.throws(() => installWorkspacePlugin(workspaceDir, { distPluginDir: distDir }), installError);
     assert.equal(fs.readFileSync(path.join(installDir, serverPath), 'utf8'), '// stub server\n');
     assert.deepEqual(fs.readdirSync(path.dirname(installDir)), [path.basename(installDir)]);
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('reinstall rejects incomplete staged assets and parseable invalid manifests', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-install-invalid-'));
+  try {
+    const distDir = createFakeDistBundle(tmpBase);
+    const workspaceDir = path.join(tmpBase, 'demo-alpha');
+    fs.mkdirSync(workspaceDir);
+    const { installDir } = installWorkspacePlugin(workspaceDir, { distPluginDir: distDir });
+    const corruptFiles = [
+      ['dist/server.cjs', 'function (', /server\.cjs/],
+      ['dist/pane.html', ' ', /pane\.html/],
+      ['dist/pane.html', '<html><body><script>function (', /pane\.html/],
+      ['dist/pane.html', '<html><body><script>function (</script></body></html>', /pane\.html/],
+      ['plugin.json', '{}', /plugin\.json/],
+      ['mcp_config.json', '{"mcpServers":{"workbench_runner":{"env":"invalid"}}}', /mcp_config\.json/],
+    ];
+
+    for (const [file, corrupt, expectedError] of corruptFiles) {
+      const source = path.join(distDir, file);
+      const destination = path.join(installDir, file);
+      const originalTemplate = fs.readFileSync(source);
+      const originalInstallation = fs.readFileSync(destination);
+      fs.writeFileSync(source, corrupt, 'utf8');
+
+      assert.throws(() => installWorkspacePlugin(workspaceDir, { distPluginDir: distDir }), expectedError);
+      assert.deepEqual(fs.readFileSync(destination), originalInstallation);
+      fs.writeFileSync(source, originalTemplate);
+    }
+    assert.deepEqual(fs.readdirSync(path.dirname(installDir)), [path.basename(installDir)]);
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('conflicting promotions leave a usable install and preserve the displaced backup', (t) => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-install-race-'));
+  try {
+    const distDir = createFakeDistBundle(tmpBase);
+    const workspaceDir = path.join(tmpBase, 'demo-alpha');
+    fs.mkdirSync(workspaceDir);
+    const { installDir } = installWorkspacePlugin(workspaceDir, { distPluginDir: distDir });
+    const serverPath = path.join('dist', 'server.cjs');
+    fs.writeFileSync(path.join(distDir, serverPath), '// updated server\n', 'utf8');
+
+    const rename = fs.renameSync;
+    let backupDir;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      rename(from, to);
+      if (from === installDir && path.basename(to) === 'previous') {
+        backupDir = to;
+        installWorkspacePlugin(workspaceDir, { distPluginDir: distDir });
+      }
+    });
+
+    assert.throws(() => installWorkspacePlugin(workspaceDir, { distPluginDir: distDir }), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.ok(error.message.includes(backupDir));
+      return true;
+    });
+    assert.equal(fs.readFileSync(path.join(installDir, serverPath), 'utf8'), '// updated server\n');
+    assert.equal(fs.readFileSync(path.join(backupDir, serverPath), 'utf8'), '// stub server\n');
   } finally {
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
