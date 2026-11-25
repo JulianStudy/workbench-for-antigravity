@@ -39,8 +39,8 @@
 
 ### 自动化测试与严格校验
 
-- `cd plugins/workbench-src && npm ci && npm run build && npm test`（Node v24.22.3）：**36/36 通过，0 失败**。
-- `agy-node --test test/*.test.mjs`（App 自带 Node v24.22.0）：**36/36 通过，0 失败**。
+- `cd plugins/workbench-src && npm ci && npm run build && npm test`（Node v24.22.3）：**37/37 通过，0 失败**。
+- `agy-node --test test/*.test.mjs`（App 自带 Node v24.22.0）：**37/37 通过，0 失败**。
 - `agy plugin validate <安装目录> --strict`：`work/workbench-demo`（`workbench-701df7f47d07`）与 `work/workbench-demo-copy/gate2-peer`（`workbench-545f1db34d4e`）均退出码 `0`。
 
 ---
