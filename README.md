@@ -1,8 +1,8 @@
 # Workbench for Antigravity
 
-Workbench adds a local acceptance-check sidebar to the Antigravity desktop app. This prototype runs one bundled demo check, shows its result and evidence, and marks the result stale when the tracked source or test changes. The latest completed run is stored in the demo project's `.workbench/last-run.json`.
+Workbench adds a local, workspace-isolated acceptance-check sidebar to the Antigravity desktop app. Each project defines its checks in `workbench.json` at the workspace root, runs checks individually or sequentially, tracks per-check staleness against tracked files and check config, persists each check's latest completed evidence to `.workbench/results.json` (`schemaVersion: 2`), and lets the user preview and explicitly attach a valid failure summary to the next conversation message via `app.updateModelContext()`.
 
-## Build and test
+## Build, test, and install
 
 Use Node.js 24 and npm. From the repository root, run:
 
@@ -13,17 +13,61 @@ npm run build
 npm test
 ```
 
-The build produces the self-contained plugin at `dist/workbench/` and installs a copy in `work/workbench-demo/.agents/plugins/workbench/`. The installed bundle uses Antigravity's bundled Node.js and needs no npm install.
+`npm run build` outputs the generic self-contained plugin template at `dist/workbench/` (zero runtime `node_modules`) and installs a workspace-bound copy into `work/workbench-demo/`.
 
-## Try the demo
+To install Workbench into any trusted workspace:
 
-1. Open `work/workbench-demo/` as a project in Antigravity App. The prototype was verified on version 2.34.0.
-2. Send a message in a conversation under the demo project to load its workspace plugins. In the conversation, open **More actions → Plugins → Workbench**.
-3. Confirm that the sidebar's check directory is the demo project, then click **运行检查** (Run check). The result should be **通过** (Passed).
-4. Change and save a comment in the demo's `src/format-total.mjs`. The sidebar should show **已过期** (Stale) and retain the preceding result. Run the check again to refresh the evidence.
+```sh
+cd plugins/workbench-src
+node scripts/install-workspace.mjs /path/to/your/workspace
+```
 
-The prototype runs the fixed `test/format-total.test.mjs` test and tracks that test and `src/format-total.mjs`. To try a second workspace, copy the demo source and test along with the plugin and omit `.workbench/`. Install the plugin only in workspaces whose test code you trust.
+The installer normalizes the workspace path with `realpath`, generates a deterministic per-workspace identity `workbench-<12-hex-sha256>` under `<workspace>/.agents/plugins/<plugin-name>/`, binds `--expected-root` in `mcp_config.json` (keeping `"command": "node"` so Antigravity falls back to its bundled Node.js), and sets a disambiguated sidebar menu title `Workbench (<dir> · <hash4>)`.
 
-On Antigravity App 2.34.0, switching between projects with the same plugin name can reuse the prior workspace's MCP service. If the displayed directory is wrong, restart the App and open a conversation in the intended project before running a check.
+Validate an installed directory with:
+
+```sh
+agy plugin validate <installed-plugin-dir> --strict
+```
+
+### Collaboration vs. local files
+
+- **Commit to Git**: `workbench.json` (your project's acceptance checklist).
+- **Keep local (`.gitignore`)**: `/.agents/plugins/workbench-*/` and `/.workbench/`. Because generated `mcp_config.json` binds the machine's absolute real path, each machine installs via `install-workspace.mjs`. Copying an installed directory to another workspace is rejected at startup.
+- **Upgrading from `alpha.2`**: Remove legacy `.agents/plugins/workbench/` before running `install-workspace.mjs` (the installer stops and lists conflicting directories without mutating files). Existing `.workbench/last-run.json` files are left untouched; `alpha.3` reads and writes `.workbench/results.json`.
+
+## Configuration (`workbench.json`)
+
+Place `workbench.json` in the workspace root:
+
+```json
+{
+  "checks": [
+    {
+      "id": "format-total",
+      "name": "1250 分显示为 ¥12.50",
+      "command": ["node", "--test", "--test-isolation=none", "test/format-total.test.mjs"],
+      "files": ["src/format-total.mjs", "test/format-total.test.mjs"],
+      "timeoutMs": 15000
+    },
+    {
+      "id": "clean-label",
+      "name": "去除标签首尾空格",
+      "command": ["node", "--test", "--test-isolation=none", "test/clean-label.test.mjs"],
+      "files": ["src/clean-label.mjs", "test/clean-label.test.mjs"],
+      "timeoutMs": 15000
+    }
+  ]
+}
+```
+
+- `files` accepts explicit repo-relative paths only (absolute paths, `..` traversal, and symlinks escaping the workspace are rejected).
+- `command` runs with `shell: false` at the bound workspace root. `"node"` reuses the active Node runtime (including Antigravity's bundled Electron/Node runtime); other executables resolve via the MCP server's `PATH` or explicit path. Install only in workspaces whose test code you trust.
+
+## Verified scope (`v0.1.0-alpha.3` candidate)
+
+- Verified on Antigravity desktop app **2.34.0** (`agy` CLI **1.5.16**, bundled Node **v24.22.0**).
+- Supported entrypoint: manual runs and failure-evidence attachment from the Antigravity desktop sidebar (`aux_pane`). Antigravity CLI ignores some UI visibility metadata and is not a supported execution entrypoint.
+- Deferred to future releases: directory globs, Git diff line counts, background jobs surviving pane close, opening source tabs, Agent-initiated check runs, and Marketplace publishing.
 
 [中文安装说明](plugins/workbench-src/README.md) · [桌面验收记录](docs/acceptance-report.md)
