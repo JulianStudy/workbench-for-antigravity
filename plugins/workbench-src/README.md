@@ -87,5 +87,5 @@ agy plugin validate <安装脚本输出的目录> --strict
 - **禁止复制工作区安装目录到其他项目**：工作区绑定模式启动时强制核对 `--expected-root` 与实际解析出的工作区根目录，缺失或不一致时会禁用运行并提示重新用安装脚本安装。
 - **跟踪路径限制**：`workbench.json` 的 `files` 只支持显式仓库相对路径；绝对路径、`..` 越界以及指向工作区外的符号链接（含悬空链接）均会报错。正常删除的工作区内文件记为 `MISSING` 并标「已过期」。
 - **批跑配置变更保护**：点击「全部运行」期间，若排队中的某项配置在执行前发生变更，服务端会跳过该项并提示用户重新运行，不会执行未确认的新命令。
-- **仅支持桌面侧栏入口**：Antigravity CLI 会忽略部分 UI 可见性元数据，暂不把 CLI 或 Agent 自动调用作为支持路径。
+- **仅支持桌面侧栏入口（服务端 UI 宿主能力校验）**：所有变更与执行类工具（`workbench_add_trusted_workspace`、`workbench_remove_trusted_workspace`、`workbench_run_check`、`workbench_run_all`）均在服务端强制校验客户端的 MCP App UI 能力声明（`io.modelcontextprotocol/ui` 且支持 `text/html;profile=mcp-app`）；未声明该能力的非 UI 宿主（如 `agy` CLI）会在服务端直接拒绝，不会修改受信任工作区或触发命令执行。
 - **关窗与持久化边界**：每项仅持久化最近一次已完成的结果；Antigravity 关闭侧栏会中止前端在途 `tools/call`，不承诺运行中途关窗必产新结果。

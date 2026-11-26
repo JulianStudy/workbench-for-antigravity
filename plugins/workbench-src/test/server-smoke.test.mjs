@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +8,21 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { installWorkspacePlugin } from '../scripts/install-workspace.mjs';
-import { parseServerArgs, resolveServerMode } from '../src/server.mjs';
+import {
+  isUiCapableClient,
+  parseServerArgs,
+  resolveServerMode,
+  UI_HOST_REQUIRED_ERROR,
+} from '../src/server.mjs';
+import { addTrustedWorkspace, getTrustedWorkspacesFilePath } from '../src/workspaces.mjs';
+
+const UI_HOST_CAPABILITIES = {
+  extensions: {
+    'io.modelcontextprotocol/ui': {
+      mimeTypes: ['text/html;profile=mcp-app'],
+    },
+  },
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../..');
@@ -41,7 +56,7 @@ function createSandboxProject(tmpBase, name = 'demo-e2e') {
   return sandboxProject;
 }
 
-async function connectStdioServer(args, envOverrides = null) {
+async function connectStdioServer(args, envOverrides = null, { uiCapable = true } = {}) {
   const env = { ...process.env };
   if (envOverrides) {
     for (const [key, val] of Object.entries(envOverrides)) {
@@ -58,7 +73,12 @@ async function connectStdioServer(args, envOverrides = null) {
     env,
     stderr: 'pipe',
   });
-  const client = new Client({ name: 'workbench-e2e-test', version: '0.1.0' });
+  const client = uiCapable
+    ? new Client(
+        { name: 'workbench-e2e-test', version: '0.1.0' },
+        { capabilities: UI_HOST_CAPABILITIES }
+      )
+    : new Client({ name: 'workbench-non-ui-test', version: '0.1.0' });
   await client.connect(transport);
   return client;
 }
@@ -512,6 +532,7 @@ test('bundled dist/server.cjs in Global Mode supports stateless multi-workspace 
     assert.equal(pingRes.structuredContent?.ok, true);
     assert.equal(pingRes.structuredContent?.mode, 'global');
     assert.equal(pingRes.structuredContent?.pong, 'workbench-ok');
+    assert.equal(pingRes.structuredContent?.uiHostCapable, true);
 
     const openUnbound = await client.callTool({ name: 'open_workbench', arguments: {} });
     assert.equal(openUnbound.structuredContent?.ok, true);
@@ -730,6 +751,263 @@ test('workspace-bound server rejects workbench_add_trusted_workspace and workben
     });
     assert.equal(removeRes.structuredContent?.ok, false);
     assert.equal(removeRes.structuredContent?.mode, 'workspace');
+  } finally {
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('isUiCapableClient requires io.modelcontextprotocol/ui extension with text/html;profile=mcp-app mimeType', () => {
+  assert.equal(isUiCapableClient(null), false);
+  assert.equal(isUiCapableClient(undefined), false);
+  assert.equal(isUiCapableClient({}), false);
+  assert.equal(isUiCapableClient({ extensions: {} }), false);
+  assert.equal(
+    isUiCapableClient({ extensions: { 'io.modelcontextprotocol/ui': {} } }),
+    false
+  );
+  assert.equal(
+    isUiCapableClient({
+      extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/plain'] } },
+    }),
+    false
+  );
+  assert.equal(
+    isUiCapableClient({
+      extensions: {
+        'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] },
+      },
+    }),
+    true
+  );
+  assert.equal(
+    isUiCapableClient({
+      extensions: {
+        'io.modelcontextprotocol/ui': {
+          mimeTypes: ['text/plain', 'text/html;profile=mcp-app'],
+        },
+      },
+    }),
+    true
+  );
+});
+
+test('Global Mode server blocks mutating and command-executing tools for non-UI / CLI clients without side effects', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-cli-global-gate-'));
+  const fakeGlobalInstall = path.join(tmpBase, '.gemini', 'config', 'plugins', 'workbench');
+  const pluginDataDir = path.join(tmpBase, '.gemini', 'config', 'plugin-data', 'workbench');
+  fs.mkdirSync(path.dirname(fakeGlobalInstall), { recursive: true });
+  fs.cpSync(distPluginDir, fakeGlobalInstall, { recursive: true });
+
+  const tempProj = path.join(tmpBase, 'marker-proj');
+  const markerPath = path.join(tempProj, 'executed.marker');
+  fs.mkdirSync(path.join(tempProj, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tempProj, 'src', 'index.mjs'), 'export const ok = true;\n', 'utf8');
+  fs.writeFileSync(
+    path.join(tempProj, 'workbench.json'),
+    JSON.stringify(
+      {
+        checks: [
+          {
+            id: 'marker-check',
+            name: 'Write side-effect marker if ever executed',
+            command: [
+              'node',
+              '-e',
+              `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'EXECUTED')`,
+            ],
+            files: ['src/index.mjs'],
+            timeoutMs: 10000,
+          },
+        ],
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+
+  const mcpConfig = JSON.parse(
+    fs.readFileSync(path.join(fakeGlobalInstall, 'mcp_config.json'), 'utf8')
+  );
+  const resolvedArgs = mcpConfig.mcpServers.workbench_runner.args.map((arg) =>
+    arg
+      .replace('${PLUGIN_ROOT}', fakeGlobalInstall)
+      .replace('${PLUGIN_DATA}', pluginDataDir)
+  );
+
+  const client = await connectStdioServer(
+    resolvedArgs,
+    { PLUGIN_DATA: undefined },
+    { uiCapable: false }
+  );
+  try {
+    const trustedFile = getTrustedWorkspacesFilePath(pluginDataDir);
+
+    // 1. Read-only diagnostics report uiHostCapable: false
+    const pingRes = await client.callTool({ name: 'workbench_ping', arguments: {} });
+    assert.equal(pingRes.isError, undefined);
+    assert.equal(pingRes.structuredContent?.ok, true);
+    assert.equal(pingRes.structuredContent?.mode, 'global');
+    assert.equal(pingRes.structuredContent?.uiHostCapable, false);
+
+    // Read-only open_workbench remains callable
+    const openRes = await client.callTool({ name: 'open_workbench', arguments: {} });
+    assert.equal(openRes.isError, undefined);
+    assert.equal(openRes.structuredContent?.ok, true);
+
+    // 2. workbench_add_trusted_workspace is blocked BEFORE touching disk
+    const addRes = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: tempProj },
+    });
+    assert.equal(addRes.isError, true);
+    assert.equal(addRes.content?.[0]?.text, UI_HOST_REQUIRED_ERROR);
+    assert.equal(addRes.structuredContent?.ok, false);
+    assert.equal(addRes.structuredContent?.blockedByUiHostGate, true);
+    assert.equal(addRes.structuredContent?.mode, 'global');
+    assert.equal(addRes.structuredContent?.error, UI_HOST_REQUIRED_ERROR);
+    assert.equal(fs.existsSync(trustedFile), false, 'trusted-workspaces.json must not be created');
+
+    // 3. Pre-seed trusted-workspaces.json and snapshot SHA-256
+    const { workspace } = addTrustedWorkspace(pluginDataDir, tempProj);
+    const workspaceId = workspace.id;
+    const shaBefore = crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(trustedFile))
+      .digest('hex');
+
+    // Read-only workbench_get_status remains callable
+    const statusRes = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { workspaceId },
+    });
+    assert.equal(statusRes.isError, undefined);
+    assert.equal(statusRes.structuredContent?.ok, true);
+    assert.equal(statusRes.structuredContent?.workspaceBound, true);
+
+    // 4. workbench_remove_trusted_workspace is blocked and leaves trusted-workspaces.json untouched
+    const removeRes = await client.callTool({
+      name: 'workbench_remove_trusted_workspace',
+      arguments: { workspaceId },
+    });
+    assert.equal(removeRes.isError, true);
+    assert.equal(removeRes.structuredContent?.ok, false);
+    assert.equal(removeRes.structuredContent?.blockedByUiHostGate, true);
+    assert.equal(removeRes.structuredContent?.mode, 'global');
+    const shaAfter = crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(trustedFile))
+      .digest('hex');
+    assert.equal(shaAfter, shaBefore, 'trusted-workspaces.json SHA-256 must remain unchanged');
+
+    // 5. workbench_run_check is blocked before spawning any subprocess or persisting results
+    const runCheckRes = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'marker-check', workspaceId },
+    });
+    assert.equal(runCheckRes.isError, true);
+    assert.equal(runCheckRes.structuredContent?.ok, false);
+    assert.equal(runCheckRes.structuredContent?.blockedByUiHostGate, true);
+    assert.equal(runCheckRes.structuredContent?.mode, 'global');
+    assert.equal(fs.existsSync(markerPath), false, 'executed.marker must not exist after blocked run_check');
+    assert.equal(
+      fs.existsSync(path.join(tempProj, '.workbench', 'results.json')),
+      false,
+      '.workbench/results.json must not exist after blocked run_check'
+    );
+
+    // 6. workbench_run_all is blocked before spawning any subprocess or persisting results
+    const runAllRes = await client.callTool({
+      name: 'workbench_run_all',
+      arguments: { workspaceId },
+    });
+    assert.equal(runAllRes.isError, true);
+    assert.equal(runAllRes.structuredContent?.ok, false);
+    assert.equal(runAllRes.structuredContent?.blockedByUiHostGate, true);
+    assert.equal(runAllRes.structuredContent?.mode, 'global');
+    assert.equal(fs.existsSync(markerPath), false, 'executed.marker must not exist after blocked run_all');
+    assert.equal(
+      fs.existsSync(path.join(tempProj, '.workbench', 'results.json')),
+      false,
+      '.workbench/results.json must not exist after blocked run_all'
+    );
+  } finally {
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('Workspace Mode server blocks command-executing and mutating tools for non-UI / CLI clients without side effects', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-cli-ws-gate-'));
+  const sandboxProject = createSandboxProject(tmpBase, 'demo-cli-ws');
+  const installed = installWorkspacePlugin(sandboxProject, { distPluginDir });
+  const mcpConfig = JSON.parse(
+    fs.readFileSync(path.join(installed.installDir, 'mcp_config.json'), 'utf8')
+  );
+  const resolvedArgs = mcpConfig.mcpServers.workbench_runner.args.map((arg) =>
+    arg.replace('${PLUGIN_ROOT}', installed.installDir)
+  );
+
+  const client = await connectStdioServer(resolvedArgs, null, { uiCapable: false });
+  try {
+    const pingRes = await client.callTool({ name: 'workbench_ping', arguments: {} });
+    assert.equal(pingRes.isError, undefined);
+    assert.equal(pingRes.structuredContent?.ok, true);
+    assert.equal(pingRes.structuredContent?.mode, 'workspace');
+    assert.equal(pingRes.structuredContent?.uiHostCapable, false);
+
+    // Read-only tools remain callable
+    const openRes = await client.callTool({ name: 'open_workbench', arguments: {} });
+    assert.equal(openRes.isError, undefined);
+    assert.equal(openRes.structuredContent?.ok, true);
+
+    const statusRes = await client.callTool({ name: 'workbench_get_status', arguments: {} });
+    assert.equal(statusRes.isError, undefined);
+    assert.equal(statusRes.structuredContent?.ok, true);
+
+    // Command-executing tools are blocked before spawning or creating .workbench/results.json
+    const runCheckRes = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'format-total' },
+    });
+    assert.equal(runCheckRes.isError, true);
+    assert.equal(runCheckRes.content?.[0]?.text, UI_HOST_REQUIRED_ERROR);
+    assert.equal(runCheckRes.structuredContent?.ok, false);
+    assert.equal(runCheckRes.structuredContent?.blockedByUiHostGate, true);
+    assert.equal(runCheckRes.structuredContent?.mode, 'workspace');
+    assert.equal(runCheckRes.structuredContent?.error, UI_HOST_REQUIRED_ERROR);
+    assert.equal(
+      fs.existsSync(path.join(sandboxProject, '.workbench', 'results.json')),
+      false,
+      '.workbench/results.json must not exist after blocked workspace run_check'
+    );
+
+    const runAllRes = await client.callTool({ name: 'workbench_run_all', arguments: {} });
+    assert.equal(runAllRes.isError, true);
+    assert.equal(runAllRes.structuredContent?.ok, false);
+    assert.equal(runAllRes.structuredContent?.blockedByUiHostGate, true);
+    assert.equal(runAllRes.structuredContent?.mode, 'workspace');
+    assert.equal(
+      fs.existsSync(path.join(sandboxProject, '.workbench', 'results.json')),
+      false,
+      '.workbench/results.json must not exist after blocked workspace run_all'
+    );
+
+    // Mutating workspace-trust tools are also blocked by UI host gate first
+    const addRes = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: sandboxProject },
+    });
+    assert.equal(addRes.isError, true);
+    assert.equal(addRes.structuredContent?.blockedByUiHostGate, true);
+
+    const removeRes = await client.callTool({
+      name: 'workbench_remove_trusted_workspace',
+      arguments: { workspaceId: '0123456789ab' },
+    });
+    assert.equal(removeRes.isError, true);
+    assert.equal(removeRes.structuredContent?.blockedByUiHostGate, true);
   } finally {
     await client.close();
     fs.rmSync(tmpBase, { recursive: true, force: true });

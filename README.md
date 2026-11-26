@@ -87,7 +87,7 @@ Place `workbench.json` in the workspace root:
 
 - Dual-mode plugin (`global` + `workspace`) with `assets/logo.svg`, passing `agy plugin validate --strict` with zero errors, warnings, or notes.
 - Verified on Antigravity desktop app **2.35.2** (bundled Node **v24.22.0**).
-- Supported entrypoint: manual runs and failure-evidence attachment from the Antigravity desktop sidebar (`aux_pane`). Antigravity CLI ignores some UI visibility metadata and is not a supported execution entrypoint.
+- Supported entrypoint: manual runs and failure-evidence attachment from the Antigravity desktop sidebar (`aux_pane`). All mutating and command-executing tools (`workbench_add_trusted_workspace`, `workbench_remove_trusted_workspace`, `workbench_run_check`, `workbench_run_all`) enforce a server-side MCP App UI-host capability gate (`io.modelcontextprotocol/ui` with `text/html;profile=mcp-app`), so non-UI hosts such as `agy` CLI are refused at the server level without modifying trusted workspaces or spawning commands.
 - Deferred to future releases: directory globs, Git diff line counts, background jobs surviving pane close, opening source tabs, and Agent-initiated check runs.
 
 [中文安装说明](plugins/workbench-src/README.md) · [桌面验收记录](docs/acceptance-report.md)

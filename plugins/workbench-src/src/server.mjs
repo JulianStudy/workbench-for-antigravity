@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
+  getUiCapability,
   registerAppResource,
   registerAppTool,
   RESOURCE_MIME_TYPE,
@@ -23,6 +24,8 @@ import {
 
 export const WORKBENCH_UI_URI = 'ui://workbench/pane.html';
 export const DEFAULT_ENTRY_TITLE = 'Workbench';
+export const UI_HOST_REQUIRED_ERROR =
+  '当前 MCP 客户端未声明 MCP App UI 能力（如 CLI / 非 UI 宿主），已拒绝工作区信任变更与命令执行。请在 Antigravity 桌面侧栏手动操作。';
 
 const MISSING_PLUGIN_DATA_ERROR = '缺少可写的 PLUGIN_DATA 目录，无法保存受信任工作区列表。';
 const UNTRUSTED_WORKSPACE_BINDING_ERROR = '所选工作区不在受信任列表中，请重新选择或添加。';
@@ -30,6 +33,13 @@ const UNBOUND_EXECUTION_ERROR = '当前侧栏未绑定受信任工作区，已�
 const BUSY_REMOVE_WORKSPACE_ERROR = '该工作区有检查正在运行，请等待完成后再移除。';
 const WORKSPACE_MODE_ADD_ERROR = '当前处于工作区绑定模式，不支持添加其他工作区。';
 const WORKSPACE_MODE_REMOVE_ERROR = '当前处于工作区绑定模式，不支持移除工作区。';
+
+export function isUiCapableClient(clientCapabilities) {
+  const uiCap = getUiCapability(clientCapabilities);
+  return Boolean(
+    uiCap && Array.isArray(uiCap.mimeTypes) && uiCap.mimeTypes.includes(RESOURCE_MIME_TYPE)
+  );
+}
 
 const STATE_LABELS = {
   not_run: '未运行',
@@ -443,6 +453,19 @@ export function createWorkbenchServer({
     return withRuntimeMeta(workspaceRunner.getStatus(), extra);
   };
 
+  const hasUiHostCapability = () => isUiCapableClient(server.server.getClientCapabilities());
+
+  const buildUiHostBlockedResult = () => ({
+    isError: true,
+    content: [{ type: 'text', text: UI_HOST_REQUIRED_ERROR }],
+    structuredContent: {
+      ok: false,
+      blockedByUiHostGate: true,
+      mode: runtimeCtx.mode,
+      error: UI_HOST_REQUIRED_ERROR,
+    },
+  });
+
   registerAppTool(
     server,
     'open_workbench',
@@ -696,6 +719,9 @@ export function createWorkbenchServer({
       },
     },
     async ({ id, workspaceId }) => {
+      if (!hasUiHostCapability()) {
+        return buildUiHostBlockedResult();
+      }
       if (isGlobalMode) {
         if (!runtimeCtx.ok) {
           const snapshot = buildErrorSnapshot({ busy: false });
@@ -758,6 +784,9 @@ export function createWorkbenchServer({
       },
     },
     async (args = {}) => {
+      if (!hasUiHostCapability()) {
+        return buildUiHostBlockedResult();
+      }
       if (isGlobalMode) {
         if (!runtimeCtx.ok) {
           const snapshot = buildErrorSnapshot({ busy: false });
@@ -820,6 +849,9 @@ export function createWorkbenchServer({
       },
     },
     async ({ workspacePath }) => {
+      if (!hasUiHostCapability()) {
+        return buildUiHostBlockedResult();
+      }
       if (!isGlobalMode) {
         const payload = {
           ok: false,
@@ -907,6 +939,9 @@ export function createWorkbenchServer({
       },
     },
     async ({ workspaceId }) => {
+      if (!hasUiHostCapability()) {
+        return buildUiHostBlockedResult();
+      }
       if (!isGlobalMode) {
         const payload = {
           ok: false,
@@ -1018,9 +1053,10 @@ export function createWorkbenchServer({
       },
     },
     async () => {
+      const uiHostCapable = hasUiHostCapability();
       if (isGlobalMode) {
         if (!runtimeCtx.ok) {
-          const payload = buildErrorSnapshot({ pong: 'workbench-ok' });
+          const payload = buildErrorSnapshot({ pong: 'workbench-ok', uiHostCapable });
           return {
             content: [{ type: 'text', text: `pong error: ${payload.rootError}` }],
             structuredContent: payload,
@@ -1030,7 +1066,7 @@ export function createWorkbenchServer({
         const payload = buildGlobalUnboundSnapshot({
           trustedWorkspaces,
           persistenceError,
-          extra: { pong: 'workbench-ok' },
+          extra: { pong: 'workbench-ok', uiHostCapable },
         });
         return {
           content: [
@@ -1043,7 +1079,7 @@ export function createWorkbenchServer({
         };
       }
 
-      const payload = getWorkspaceStatusSnapshot({ pong: 'workbench-ok' });
+      const payload = getWorkspaceStatusSnapshot({ pong: 'workbench-ok', uiHostCapable });
       const text = payload.ok
         ? `pong: ${payload.pong} | root: ${payload.projectRoot} | node: ${payload.nodeVersion}`
         : `pong error: ${payload.rootError}`;
