@@ -258,10 +258,61 @@ export async function attachFailureEvidenceContext({
   }
 }
 
+export function buildScopedToolArgs({ mode, workspaceId, extra = {} } = {}) {
+  const base = extra && typeof extra === 'object' ? { ...extra } : {};
+  if (mode === 'global' && typeof workspaceId === 'string' && workspaceId.trim().length > 0) {
+    base.workspaceId = workspaceId.trim();
+  }
+  return base;
+}
+
+export function canRunChecksInPane({
+  data,
+  isConnected,
+  busy,
+  mode,
+  selectedWorkspaceId = '',
+} = {}) {
+  if (!isConnected || busy || !data || data.ok === false || data.configOk === false) {
+    return false;
+  }
+  if (mode === 'global') {
+    const hasWorkspaceId =
+      typeof selectedWorkspaceId === 'string' && selectedWorkspaceId.trim().length > 0;
+    if (!hasWorkspaceId || data.workspaceBound !== true) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function computeWorkspaceSelectSignature(
+  trustedWorkspaces,
+  selectedWorkspaceId = '',
+  busy = false
+) {
+  const list = Array.isArray(trustedWorkspaces)
+    ? trustedWorkspaces.map((ws) => ({
+        id: ws?.id ?? '',
+        label: ws?.label ?? '',
+        path: ws?.path ?? '',
+        exists: Boolean(ws?.exists),
+        hasConfig: Boolean(ws?.hasConfig),
+      }))
+    : [];
+  return JSON.stringify({
+    selectedWorkspaceId: typeof selectedWorkspaceId === 'string' ? selectedWorkspaceId : '',
+    busy: Boolean(busy),
+    trustedWorkspaces: list,
+  });
+}
+
 export function computeChecksRenderSignature({
   data,
   isConnected,
   busy,
+  mode = null,
+  selectedWorkspaceId = '',
   expandedCheckIds,
   previewCheckIds = new Set(),
   outputCache,
@@ -270,8 +321,20 @@ export function computeChecksRenderSignature({
   attachFeedbackByCheckId = new Map(),
   lastAttachedEvidence = null,
 }) {
+  const resolvedMode = mode || data?.mode || 'workspace';
+  const resolvedWorkspaceId =
+    typeof selectedWorkspaceId === 'string' ? selectedWorkspaceId : '';
+
   if (!data) {
-    return JSON.stringify({ empty: true, isConnected: Boolean(isConnected), busy: Boolean(busy) });
+    return JSON.stringify({
+      empty: true,
+      mode: resolvedMode,
+      workspaceBound: false,
+      selectedWorkspaceId: resolvedWorkspaceId,
+      bindingError: null,
+      isConnected: Boolean(isConnected),
+      busy: Boolean(busy),
+    });
   }
 
   const checks = Array.isArray(data.checks)
@@ -325,6 +388,10 @@ export function computeChecksRenderSignature({
 
   return JSON.stringify({
     ok: data.ok !== false,
+    mode: resolvedMode,
+    workspaceBound: Boolean(data.workspaceBound),
+    selectedWorkspaceId: resolvedWorkspaceId,
+    bindingError: data.bindingError || null,
     configOk: data.configOk !== false,
     projectRoot: data.projectRoot || null,
     rootError: data.rootError || null,
@@ -418,6 +485,9 @@ export function createExpandedOutputLoader({
 
         try {
           const detail = await fetchDetail(checkId);
+          if (detail?.discarded) {
+            continue;
+          }
           if (detail?.ok && detail.check?.lastRun) {
             outputCache.set(checkId, {
               finishedAt: detail.check.lastRun.finishedAt,

@@ -7,9 +7,12 @@ import {
   MAX_FAILURE_EVIDENCE_BYTES,
   attachFailureEvidenceContext,
   buildFailureEvidencePreview,
+  buildScopedToolArgs,
   canAttachFailureEvidence,
+  canRunChecksInPane,
   clearErroredOutputCache,
   computeChecksRenderSignature,
+  computeWorkspaceSelectSignature,
   createExpandedOutputLoader,
   redactWorkspacePaths,
   shouldShowReplaceEvidenceWarning,
@@ -868,6 +871,322 @@ test('shouldShowReplaceEvidenceWarning suppresses warning only when the exact ch
     }),
     true
   );
+});
+
+test('buildScopedToolArgs injects workspaceId only in global mode when non-empty and never mutates extra', () => {
+  const extra = { id: 'format-total' };
+
+  // Global mode + non-empty workspaceId
+  const globalBound = buildScopedToolArgs({
+    mode: 'global',
+    workspaceId: 'a1b2c3d4e5f6',
+    extra,
+  });
+  assert.deepEqual(globalBound, { id: 'format-total', workspaceId: 'a1b2c3d4e5f6' });
+  assert.deepEqual(extra, { id: 'format-total' }, 'must not mutate caller extra object');
+
+  // Global mode + empty / whitespace / null / undefined workspaceId -> omitted
+  for (const emptyId of ['', '   ', null, undefined]) {
+    const res = buildScopedToolArgs({ mode: 'global', workspaceId: emptyId, extra });
+    assert.deepEqual(res, { id: 'format-total' });
+    assert.equal(Object.prototype.hasOwnProperty.call(res, 'workspaceId'), false);
+  }
+
+  // Global mode + omitted extra
+  assert.deepEqual(
+    buildScopedToolArgs({ mode: 'global', workspaceId: 'a1b2c3d4e5f6' }),
+    { workspaceId: 'a1b2c3d4e5f6' }
+  );
+  assert.deepEqual(buildScopedToolArgs({ mode: 'global', workspaceId: '' }), {});
+
+  // Workspace mode -> NEVER injects workspaceId even if provided
+  const wsMode = buildScopedToolArgs({
+    mode: 'workspace',
+    workspaceId: 'a1b2c3d4e5f6',
+    extra,
+  });
+  assert.deepEqual(wsMode, { id: 'format-total' });
+  assert.equal(Object.prototype.hasOwnProperty.call(wsMode, 'workspaceId'), false);
+});
+
+test('canRunChecksInPane enforces connection, busy, config, and global mode binding invariants', () => {
+  const validWorkspaceData = makeSnapshot({ mode: 'workspace', workspaceBound: true });
+  const legacyWorkspaceData = makeSnapshot(); // no explicit mode/workspaceBound
+  const boundGlobalData = makeSnapshot({ mode: 'global', workspaceBound: true });
+  const unboundGlobalData = makeSnapshot({ mode: 'global', workspaceBound: false });
+
+  // Workspace mode valid
+  assert.equal(
+    canRunChecksInPane({
+      data: validWorkspaceData,
+      isConnected: true,
+      busy: false,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    true
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: legacyWorkspaceData,
+      isConnected: true,
+      busy: false,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    true
+  );
+
+  // Common blocking conditions
+  assert.equal(
+    canRunChecksInPane({
+      data: validWorkspaceData,
+      isConnected: false,
+      busy: false,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    false
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: validWorkspaceData,
+      isConnected: true,
+      busy: true,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    false
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: null,
+      isConnected: true,
+      busy: false,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    false
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: makeSnapshot({ ok: false }),
+      isConnected: true,
+      busy: false,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    false
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: makeSnapshot({ configOk: false }),
+      isConnected: true,
+      busy: false,
+      mode: 'workspace',
+      selectedWorkspaceId: '',
+    }),
+    false
+  );
+
+  // Global mode: blocked if selectedWorkspaceId is empty OR workspaceBound !== true
+  assert.equal(
+    canRunChecksInPane({
+      data: boundGlobalData,
+      isConnected: true,
+      busy: false,
+      mode: 'global',
+      selectedWorkspaceId: '',
+    }),
+    false
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: unboundGlobalData,
+      isConnected: true,
+      busy: false,
+      mode: 'global',
+      selectedWorkspaceId: 'a1b2c3d4e5f6',
+    }),
+    false
+  );
+  assert.equal(
+    canRunChecksInPane({
+      data: { ...boundGlobalData, configOk: false },
+      isConnected: true,
+      busy: false,
+      mode: 'global',
+      selectedWorkspaceId: 'a1b2c3d4e5f6',
+    }),
+    false
+  );
+
+  // Global mode: allowed only when connected, not busy, ok, configOk, selectedWorkspaceId non-empty, AND workspaceBound === true
+  assert.equal(
+    canRunChecksInPane({
+      data: boundGlobalData,
+      isConnected: true,
+      busy: false,
+      mode: 'global',
+      selectedWorkspaceId: 'a1b2c3d4e5f6',
+    }),
+    true
+  );
+});
+
+test('computeWorkspaceSelectSignature stays stable across unchanged polls and changes on selection, busy, or workspace metadata edits', () => {
+  const list1 = [
+    {
+      id: 'aaaa1111bbbb',
+      label: 'project-a',
+      path: '/Users/dev/project-a',
+      exists: true,
+      hasConfig: true,
+      addedAt: '2026-11-26T00:00:00.000Z',
+    },
+    {
+      id: 'cccc2222dddd',
+      label: 'project-b',
+      path: '/Users/dev/project-b',
+      exists: true,
+      hasConfig: false,
+      addedAt: '2026-11-26T00:01:00.000Z',
+    },
+  ];
+  const list2 = list1.map((item) => ({ ...item, addedAt: '2026-11-26T00:02:00.000Z' }));
+
+  const sig1 = computeWorkspaceSelectSignature(list1, 'aaaa1111bbbb', false);
+  const sig2 = computeWorkspaceSelectSignature(list2, 'aaaa1111bbbb', false);
+  assert.equal(sig1, sig2, 'unchanged workspace list should yield identical signature');
+
+  // Selection change
+  assert.notEqual(sig1, computeWorkspaceSelectSignature(list1, '', false));
+  assert.notEqual(sig1, computeWorkspaceSelectSignature(list1, 'cccc2222dddd', false));
+
+  // Busy change
+  assert.notEqual(sig1, computeWorkspaceSelectSignature(list1, 'aaaa1111bbbb', true));
+
+  // exists / hasConfig / label / path changes
+  const missingDirList = [{ ...list1[0], exists: false }, list1[1]];
+  assert.notEqual(sig1, computeWorkspaceSelectSignature(missingDirList, 'aaaa1111bbbb', false));
+
+  const addedConfigList = [list1[0], { ...list1[1], hasConfig: true }];
+  assert.notEqual(sig1, computeWorkspaceSelectSignature(addedConfigList, 'aaaa1111bbbb', false));
+
+  // Added / removed workspace
+  assert.notEqual(sig1, computeWorkspaceSelectSignature([list1[0]], 'aaaa1111bbbb', false));
+});
+
+test('computeChecksRenderSignature includes mode, workspaceBound, selectedWorkspaceId, and bindingError while staying stable on unchanged polls', () => {
+  const expandedCheckIds = new Set();
+  const outputCache = new Map();
+
+  const unboundSnap1 = makeSnapshot({
+    mode: 'global',
+    workspaceBound: false,
+    configOk: false,
+    checks: [],
+    bindingError: null,
+    timestamp: '2026-11-26T10:00:00.000Z',
+  });
+  const unboundSnap2 = makeSnapshot({
+    mode: 'global',
+    workspaceBound: false,
+    configOk: false,
+    checks: [],
+    bindingError: null,
+    timestamp: '2026-11-26T10:00:02.000Z',
+  });
+
+  const base = {
+    data: unboundSnap1,
+    isConnected: true,
+    busy: false,
+    mode: 'global',
+    selectedWorkspaceId: '',
+    expandedCheckIds,
+    outputCache,
+  };
+
+  const sigUnbound1 = computeChecksRenderSignature(base);
+  const sigUnbound2 = computeChecksRenderSignature({ ...base, data: unboundSnap2 });
+  assert.equal(sigUnbound1, sigUnbound2, 'unchanged unbound 2s poll must not rebuild DOM');
+
+  // Mode change (workspace vs global)
+  assert.notEqual(
+    sigUnbound1,
+    computeChecksRenderSignature({
+      ...base,
+      mode: 'workspace',
+      data: { ...unboundSnap1, mode: 'workspace' },
+    })
+  );
+
+  // workspaceBound flip (false -> true)
+  assert.notEqual(
+    sigUnbound1,
+    computeChecksRenderSignature({
+      ...base,
+      data: { ...unboundSnap1, workspaceBound: true },
+    })
+  );
+
+  // selectedWorkspaceId change
+  assert.notEqual(
+    sigUnbound1,
+    computeChecksRenderSignature({
+      ...base,
+      selectedWorkspaceId: 'aaaa1111bbbb',
+    })
+  );
+
+  // bindingError change
+  assert.notEqual(
+    sigUnbound1,
+    computeChecksRenderSignature({
+      ...base,
+      data: { ...unboundSnap1, bindingError: '所选工作区不在受信任列表中，请重新选择或添加。' },
+    })
+  );
+});
+
+test('createExpandedOutputLoader ignores discarded stale-epoch responses without corrupting outputCache', async () => {
+  const snapshot = makeSnapshot();
+  const expandedCheckIds = new Set();
+  const outputCache = new Map();
+  let resolveOldFetch;
+
+  const loader = createExpandedOutputLoader({
+    getChecks: () => snapshot.checks,
+    expandedCheckIds,
+    outputCache,
+    canFetch: () => true,
+    onStateChange: () => {},
+    fetchDetail: () =>
+      new Promise((resolve) => {
+        resolveOldFetch = resolve;
+      }),
+  });
+
+  loader.toggle('format-total');
+  assert.equal(outputCache.get('format-total')?.loading, true);
+
+  // Simulate workspace switch clearing cache and re-populating fresh workspace B data
+  outputCache.clear();
+  outputCache.set('format-total', {
+    finishedAt: '2026-11-26T12:00:00.000Z',
+    output: 'workspace-B-output',
+    outputTruncated: false,
+    loading: false,
+    error: null,
+  });
+
+  // Old workspace A fetch finishes as discarded -> must NOT overwrite workspace B cache!
+  resolveOldFetch({ discarded: true });
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(outputCache.get('format-total')?.output, 'workspace-B-output');
+  assert.equal(outputCache.get('format-total')?.error, null);
 });
 
 test('UI modules stay browser-compatible (no Buffer or node:* imports) and never call sendMessage', () => {

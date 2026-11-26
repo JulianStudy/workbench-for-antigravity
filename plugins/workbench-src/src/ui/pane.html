@@ -274,6 +274,76 @@
         padding: 18px 12px;
         color: var(--color-text-secondary, #666666);
       }
+      .workspace-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .workspace-title {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .tag-subtle {
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 7px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 500;
+        background: var(--color-background-tertiary, #eceef1);
+        color: var(--color-text-secondary, #555555);
+        border: 1px solid var(--color-border-secondary, #d0d5dd);
+        white-space: nowrap;
+      }
+      .workspace-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .workspace-select {
+        flex: 1;
+        min-width: 0;
+        max-width: 100%;
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--color-border-primary, #bdbdbd);
+        background: var(--color-background-primary, #ffffff);
+        color: var(--color-text-primary, #1f1f1f);
+        font-family: inherit;
+        font-size: 12px;
+      }
+      .workspace-select:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .add-workspace-box {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 9px 10px;
+        border-radius: 6px;
+        border: 1px solid var(--color-border-secondary, #d0d5dd);
+        background: var(--color-background-primary, #ffffff);
+      }
+      .workspace-input {
+        width: 100%;
+        padding: 5px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--color-border-primary, #bdbdbd);
+        background: var(--color-background-primary, #ffffff);
+        color: var(--color-text-primary, #1f1f1f);
+        font-size: 12px;
+      }
+      .workspace-input:disabled {
+        opacity: 0.55;
+      }
+      .workspace-add-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
       .hidden {
         display: none;
       }
@@ -281,6 +351,35 @@
   </head>
   <body>
     <div class="stack">
+      <section id="workspace-card" class="card workspace-card hidden">
+        <div class="header">
+          <h2 class="workspace-title">受信任工作区</h2>
+          <span class="tag-subtle">仅绑定当前侧栏</span>
+        </div>
+        <div class="workspace-row">
+          <select id="workspace-select" class="workspace-select" aria-label="选择受信任工作区" disabled>
+            <option value="">请选择要绑定到此侧栏的工作区...</option>
+          </select>
+          <button id="toggle-add-workspace-btn" class="small" type="button" disabled>+ 添加</button>
+          <button id="remove-workspace-btn" class="small" type="button" disabled>移除</button>
+        </div>
+        <div id="add-workspace-box" class="add-workspace-box hidden">
+          <div class="hint">仅添加您信任其测试命令的工作区；每个会话侧栏独立绑定，切换不会影响其他会话。</div>
+          <input
+            id="workspace-path-input"
+            class="workspace-input mono"
+            type="text"
+            placeholder="粘贴绝对路径，例如 /Users/.../my-project"
+            autocomplete="off"
+          />
+          <div class="workspace-add-actions">
+            <button id="confirm-add-workspace-btn" class="small primary" type="button">信任并绑定</button>
+            <button id="cancel-add-workspace-btn" class="small" type="button">取消</button>
+          </div>
+        </div>
+        <div id="workspace-feedback" class="notice hidden"></div>
+      </section>
+
       <section class="card">
         <div class="header">
           <h1 class="title">Workbench 验收清单</h1>

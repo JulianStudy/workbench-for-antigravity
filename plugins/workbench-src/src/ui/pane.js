@@ -7,9 +7,12 @@ import {
   MAX_FAILURE_EVIDENCE_BYTES,
   attachFailureEvidenceContext,
   buildFailureEvidencePreview,
+  buildScopedToolArgs,
   canAttachFailureEvidence,
+  canRunChecksInPane,
   clearErroredOutputCache,
   computeChecksRenderSignature,
+  computeWorkspaceSelectSignature,
   createExpandedOutputLoader,
   shouldShowReplaceEvidenceWarning,
 } from './pane-state.mjs';
@@ -22,6 +25,16 @@ const STATE_LABELS = {
   error: '执行错误',
   running: '运行中',
 };
+
+const workspaceCardEl = document.getElementById('workspace-card');
+const workspaceSelectEl = document.getElementById('workspace-select');
+const toggleAddWorkspaceBtn = document.getElementById('toggle-add-workspace-btn');
+const removeWorkspaceBtn = document.getElementById('remove-workspace-btn');
+const addWorkspaceBoxEl = document.getElementById('add-workspace-box');
+const workspacePathInputEl = document.getElementById('workspace-path-input');
+const confirmAddWorkspaceBtn = document.getElementById('confirm-add-workspace-btn');
+const cancelAddWorkspaceBtn = document.getElementById('cancel-add-workspace-btn');
+const workspaceFeedbackEl = document.getElementById('workspace-feedback');
 
 const overallBadgeEl = document.getElementById('overall-badge');
 const countsSummaryEl = document.getElementById('counts-summary');
@@ -37,11 +50,18 @@ const checksListEl = document.getElementById('checks-list');
 
 let isConnected = false;
 let pollInFlight = false;
+let latestPollId = 0;
 let runInFlight = false;
+let workspaceActionInFlight = false;
 let attachInFlight = false;
 let attachInFlightCheckId = null;
+let currentMode = 'workspace';
+let selectedWorkspaceId = '';
+let workspaceSwitchEpoch = 0;
 let snapshotVersion = 0;
 let lastSnapshot = null;
+let lastTrustedWorkspaces = [];
+let lastWorkspaceSelectSignature = null;
 let lastChecksRenderSignature = null;
 let transientActionError = null;
 let lastAttachedEvidence = null;
@@ -73,8 +93,18 @@ function formatTime(iso) {
   }
 }
 
+function isGlobalUnbound(data) {
+  return currentMode === 'global' && (!selectedWorkspaceId || !data || data.workspaceBound !== true);
+}
+
 function computeOverallState(data) {
-  if (!data || data.ok === false || data.configOk === false) {
+  if (!data || data.ok === false || data.rootError) {
+    return { key: 'error', label: '配置/环境异常' };
+  }
+  if (isGlobalUnbound(data)) {
+    return { key: 'not_run', label: '未绑定' };
+  }
+  if (data.configOk === false) {
     return { key: 'error', label: '配置/环境异常' };
   }
   if (data.isRunning || runInFlight) {
@@ -90,8 +120,11 @@ function computeOverallState(data) {
 }
 
 function formatCountsSummary(data) {
-  if (!data || data.ok === false) {
+  if (!data || data.ok === false || data.rootError) {
     return '工作区绑定异常，已禁用执行';
+  }
+  if (isGlobalUnbound(data)) {
+    return data.bindingError ? '所选工作区当前不可用，已禁用执行' : '当前侧栏尚未绑定受信任工作区';
   }
   if (data.configOk === false) {
     return '配置文件 workbench.json 无效或缺失';
@@ -109,6 +142,18 @@ function renderBanner(el, message) {
   }
   el.textContent = message;
   el.classList.remove('hidden');
+}
+
+function renderWorkspaceFeedback(type, message) {
+  if (!message) {
+    workspaceFeedbackEl.textContent = '';
+    workspaceFeedbackEl.className = 'notice hidden';
+    return;
+  }
+  const variant =
+    type === 'success' ? 'notice-success' : type === 'error' ? 'notice-danger' : 'notice-info';
+  workspaceFeedbackEl.className = `notice ${variant}`;
+  workspaceFeedbackEl.textContent = message;
 }
 
 function renderSkippedBanner(skippedChecks) {
@@ -138,13 +183,91 @@ function isWorkspaceBusy() {
   return runInFlight || Boolean(lastSnapshot?.isRunning);
 }
 
+function isAnyActionBusy() {
+  return isWorkspaceBusy() || workspaceActionInFlight;
+}
+
+function syncWorkspaceControls() {
+  if (currentMode !== 'global') return;
+  const busy = isAnyActionBusy();
+  const globalReady = isConnected && !lastSnapshot?.rootError;
+  workspaceSelectEl.disabled = !globalReady || busy;
+  toggleAddWorkspaceBtn.disabled = !globalReady || busy;
+  removeWorkspaceBtn.disabled = !globalReady || !selectedWorkspaceId || busy;
+  workspacePathInputEl.disabled = !globalReady || workspaceActionInFlight;
+  confirmAddWorkspaceBtn.disabled = !globalReady || busy;
+  confirmAddWorkspaceBtn.textContent = workspaceActionInFlight ? '处理中...' : '信任并绑定';
+  cancelAddWorkspaceBtn.disabled = workspaceActionInFlight;
+}
+
+function renderWorkspaceSelector(trustedWorkspaces) {
+  if (currentMode !== 'global') return;
+  const list = Array.isArray(trustedWorkspaces) ? trustedWorkspaces : [];
+  const busy = isAnyActionBusy();
+  const sig = computeWorkspaceSelectSignature(list, selectedWorkspaceId, busy);
+  if (sig !== lastWorkspaceSelectSignature) {
+    lastWorkspaceSelectSignature = sig;
+    workspaceSelectEl.innerHTML = '';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = '请选择要绑定到此侧栏的工作区...';
+    workspaceSelectEl.appendChild(defaultOpt);
+
+    for (const ws of list) {
+      const opt = document.createElement('option');
+      opt.value = ws.id;
+      const suffix = !ws.exists
+        ? ' [目录不存在]'
+        : !ws.hasConfig
+          ? ' [无 workbench.json]'
+          : '';
+      opt.textContent = `${ws.label} (${ws.path})${suffix}`;
+      workspaceSelectEl.appendChild(opt);
+    }
+    workspaceSelectEl.value = selectedWorkspaceId || '';
+  }
+  syncWorkspaceControls();
+}
+
 function syncTopButtons() {
-  const busy = isWorkspaceBusy();
-  const blocked =
-    !lastSnapshot || lastSnapshot.ok === false || lastSnapshot.configOk === false || (lastSnapshot.checks || []).length === 0;
-  runAllBtn.disabled = !isConnected || busy || blocked;
-  runAllBtn.textContent = busy ? '运行中...' : '全部运行';
-  refreshBtn.disabled = !isConnected || pollInFlight;
+  const busy = isAnyActionBusy();
+  const canRun = canRunChecksInPane({
+    data: lastSnapshot,
+    isConnected,
+    busy,
+    mode: currentMode,
+    selectedWorkspaceId,
+  });
+  runAllBtn.disabled = !canRun || (lastSnapshot?.checks || []).length === 0;
+  runAllBtn.textContent = isWorkspaceBusy() ? '运行中...' : '全部运行';
+  refreshBtn.disabled = !isConnected || pollInFlight || workspaceActionInFlight;
+  syncWorkspaceControls();
+}
+
+function resetPerPaneWorkspaceState() {
+  workspaceSwitchEpoch += 1;
+  snapshotVersion += 1;
+  expandedCheckIds.clear();
+  previewCheckIds.clear();
+  outputCache.clear();
+  attachFeedbackByCheckId.clear();
+  lastChecksRenderSignature = null;
+  transientActionError = null;
+  if (currentMode === 'global' && lastSnapshot) {
+    lastSnapshot = {
+      ...lastSnapshot,
+      workspaceBound: false,
+      selectedWorkspace: null,
+      projectRoot: null,
+      checks: [],
+      isRunning: false,
+      runningCheckId: null,
+      runningBatch: false,
+      bindingError: null,
+      skippedChecks: [],
+    };
+  }
 }
 
 function getStaleReasonDescription(reason) {
@@ -287,8 +410,15 @@ function buildCheckCard(check) {
   card.className = 'card check-card';
   card.dataset.checkId = check.id;
 
-  const busy = isWorkspaceBusy();
+  const busy = isAnyActionBusy();
   const isThisRunning = Boolean(check.isRunning);
+  const canRun = canRunChecksInPane({
+    data: lastSnapshot,
+    isConnected,
+    busy,
+    mode: currentMode,
+    selectedWorkspaceId,
+  });
 
   // Header
   const header = document.createElement('div');
@@ -330,7 +460,7 @@ function buildCheckCard(check) {
   runBtn.type = 'button';
   runBtn.className = 'small';
   runBtn.textContent = isThisRunning ? '运行中...' : '运行';
-  runBtn.disabled = !isConnected || busy;
+  runBtn.disabled = !canRun;
   runBtn.addEventListener('click', () => {
     triggerRunSingleCheck(check.id);
   });
@@ -493,7 +623,9 @@ function renderChecksList(data) {
   const sig = computeChecksRenderSignature({
     data,
     isConnected,
-    busy: isWorkspaceBusy(),
+    busy: isAnyActionBusy(),
+    mode: currentMode,
+    selectedWorkspaceId,
     expandedCheckIds,
     previewCheckIds,
     outputCache,
@@ -509,11 +641,30 @@ function renderChecksList(data) {
 
   checksListEl.innerHTML = '';
 
-  if (!data || data.ok === false || data.configOk === false) {
+  if (!data || data.ok === false || data.rootError) {
     const empty = document.createElement('section');
     empty.className = 'card empty-state';
     empty.textContent =
       data?.rootError ||
+      data?.error ||
+      '暂无可显示的验收检查项。请在工作区根目录检查 workbench.json。';
+    checksListEl.appendChild(empty);
+    return;
+  }
+
+  if (isGlobalUnbound(data)) {
+    const empty = document.createElement('section');
+    empty.className = 'card empty-state';
+    empty.textContent =
+      '请先在上方选择或添加一个受信任工作区，再查看或运行该项目的验收清单。';
+    checksListEl.appendChild(empty);
+    return;
+  }
+
+  if (data.configOk === false) {
+    const empty = document.createElement('section');
+    empty.className = 'card empty-state';
+    empty.textContent =
       data?.configError ||
       '暂无可显示的验收检查项。请在工作区根目录检查 workbench.json。';
     checksListEl.appendChild(empty);
@@ -538,6 +689,35 @@ function renderSnapshot(data) {
   if (!data) return;
   lastSnapshot = data;
 
+  if (data.mode === 'global' || data.mode === 'workspace') {
+    currentMode = data.mode;
+  }
+
+  if (currentMode === 'global') {
+    workspaceCardEl.classList.remove('hidden');
+    if (Array.isArray(data.trustedWorkspaces)) {
+      lastTrustedWorkspaces = data.trustedWorkspaces;
+    }
+    if (
+      data.bindingError &&
+      selectedWorkspaceId &&
+      (!data.selectedWorkspace ||
+        !lastTrustedWorkspaces.some((ws) => ws.id === selectedWorkspaceId))
+    ) {
+      selectedWorkspaceId = '';
+      workspaceSwitchEpoch += 1;
+      transientActionError = data.bindingError;
+      expandedCheckIds.clear();
+      previewCheckIds.clear();
+      outputCache.clear();
+      attachFeedbackByCheckId.clear();
+      lastChecksRenderSignature = null;
+    }
+    renderWorkspaceSelector(lastTrustedWorkspaces);
+  } else {
+    workspaceCardEl.classList.add('hidden');
+  }
+
   // If checkDetail was bundled on single-check run, cache its output immediately.
   if (data.checkDetail?.ok && data.checkDetail.check?.lastRun) {
     const dc = data.checkDetail.check;
@@ -550,10 +730,12 @@ function renderSnapshot(data) {
     });
   }
 
+  const globalUnbound = isGlobalUnbound(data);
   const overall = computeOverallState(data);
   setBadge(overallBadgeEl, overall.key, overall.label);
   countsSummaryEl.textContent = formatCountsSummary(data);
-  projectRootEl.textContent = data.projectRoot || '-';
+  projectRootEl.textContent =
+    globalUnbound && !data.rootError ? '未选择工作区' : data.projectRoot || '-';
   runtimeInfoEl.textContent = data.nodeVersion ? `Node ${data.nodeVersion}` : '-';
 
   // Active progress banner
@@ -569,7 +751,8 @@ function renderSnapshot(data) {
   // Error banner
   const topError =
     data.rootError ||
-    (data.configOk === false ? data.configError : null) ||
+    data.bindingError ||
+    (data.ok !== false && !globalUnbound && data.configOk === false ? data.configError : null) ||
     data.persistenceError ||
     (data.ok === false ? data.error : null) ||
     transientActionError ||
@@ -608,20 +791,37 @@ function renderSnapshot(data) {
   void expandedOutputLoader.drain();
 }
 
-const app = new App({ name: 'Workbench', version: '0.1.0' }, {});
+const app = new App({ name: 'Workbench', version: '0.2.0' }, {});
 
 const expandedOutputLoader = createExpandedOutputLoader({
   getChecks: () => lastSnapshot?.checks || [],
   expandedCheckIds,
   previewCheckIds,
   outputCache,
-  canFetch: () => isConnected,
+  canFetch: () =>
+    isConnected &&
+    (currentMode !== 'global' || Boolean(selectedWorkspaceId && lastSnapshot?.workspaceBound)),
   fetchDetail: async (id) => {
-    const res = await app.callServerTool({
-      name: 'workbench_get_status',
-      arguments: { id },
-    });
-    return res?.structuredContent;
+    const reqEpoch = workspaceSwitchEpoch;
+    try {
+      const res = await app.callServerTool({
+        name: 'workbench_get_status',
+        arguments: buildScopedToolArgs({
+          mode: currentMode,
+          workspaceId: selectedWorkspaceId,
+          extra: { id },
+        }),
+      });
+      if (reqEpoch !== workspaceSwitchEpoch) {
+        return { discarded: true };
+      }
+      return res?.structuredContent;
+    } catch (err) {
+      if (reqEpoch !== workspaceSwitchEpoch) {
+        return { discarded: true };
+      }
+      throw err;
+    }
   },
   onStateChange: () => {
     if (lastSnapshot) renderChecksList(lastSnapshot);
@@ -663,6 +863,7 @@ async function confirmAttachFailureEvidence(id) {
     return;
   }
 
+  const reqEpoch = workspaceSwitchEpoch;
   attachInFlight = true;
   attachInFlightCheckId = id;
   if (lastSnapshot) renderChecksList(lastSnapshot);
@@ -676,14 +877,10 @@ async function confirmAttachFailureEvidence(id) {
     });
     if (res.ok && res.attached) {
       lastAttachedEvidence = res.attached;
+    }
+    if (reqEpoch === workspaceSwitchEpoch) {
       attachFeedbackByCheckId.set(id, {
-        type: 'success',
-        message: res.message,
-        finishedAt: check.lastRun.finishedAt,
-      });
-    } else {
-      attachFeedbackByCheckId.set(id, {
-        type: 'error',
+        type: res.ok ? 'success' : 'error',
         message: res.message,
         finishedAt: check.lastRun.finishedAt,
       });
@@ -701,7 +898,7 @@ app.ontoolinput = () => {
 };
 
 app.ontoolresult = (result) => {
-  if (result?.structuredContent) {
+  if (result?.structuredContent && workspaceSwitchEpoch === 0) {
     snapshotVersion += 1;
     renderSnapshot(result.structuredContent);
     pollHintEl.textContent = '每 2 秒自动检测文件变化';
@@ -712,19 +909,29 @@ app.onhostcontextchanged = (ctx) => {
   applyContext(ctx);
 };
 
-async function refreshStatus({ manual = false } = {}) {
-  if (!isConnected || pollInFlight) return;
-  if (!manual && document.hidden) return;
+async function refreshStatus({ manual = false, force = false } = {}) {
+  if (!isConnected) return;
+  if (!force && pollInFlight) return;
+  if (!manual && !force && document.hidden) return;
 
+  const myPollId = ++latestPollId;
   pollInFlight = true;
   const myVersion = ++snapshotVersion;
+  const reqEpoch = workspaceSwitchEpoch;
   syncTopButtons();
   try {
     const res = await app.callServerTool({
       name: 'workbench_get_status',
-      arguments: {},
+      arguments: buildScopedToolArgs({
+        mode: currentMode,
+        workspaceId: selectedWorkspaceId,
+      }),
     });
-    if (res?.structuredContent && myVersion === snapshotVersion) {
+    if (
+      res?.structuredContent &&
+      reqEpoch === workspaceSwitchEpoch &&
+      myVersion === snapshotVersion
+    ) {
       if (manual) {
         transientActionError = null;
         clearErroredOutputCache(outputCache);
@@ -733,18 +940,31 @@ async function refreshStatus({ manual = false } = {}) {
       pollHintEl.textContent = `每 2 秒自动检测 · 上次刷新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
     }
   } catch (err) {
-    if (manual) {
+    if (reqEpoch === workspaceSwitchEpoch && (manual || force)) {
       transientActionError = `刷新状态失败: ${err?.message || String(err)}`;
       renderBanner(errorBannerEl, transientActionError);
     }
   } finally {
-    pollInFlight = false;
+    if (myPollId === latestPollId) {
+      pollInFlight = false;
+    }
     syncTopButtons();
   }
 }
 
 async function triggerRunSingleCheck(id) {
-  if (!isConnected || runInFlight) return;
+  if (
+    !canRunChecksInPane({
+      data: lastSnapshot,
+      isConnected,
+      busy: isAnyActionBusy(),
+      mode: currentMode,
+      selectedWorkspaceId,
+    })
+  ) {
+    return;
+  }
+  const reqEpoch = workspaceSwitchEpoch;
   runInFlight = true;
   transientActionError = null;
   syncTopButtons();
@@ -755,9 +975,17 @@ async function triggerRunSingleCheck(id) {
   try {
     const res = await app.callServerTool({
       name: 'workbench_run_check',
-      arguments: { id },
+      arguments: buildScopedToolArgs({
+        mode: currentMode,
+        workspaceId: selectedWorkspaceId,
+        extra: { id },
+      }),
     });
     runInFlight = false;
+    if (reqEpoch !== workspaceSwitchEpoch) {
+      syncTopButtons();
+      return;
+    }
     if (res?.structuredContent) {
       snapshotVersion += 1;
       renderSnapshot(res.structuredContent);
@@ -769,6 +997,10 @@ async function triggerRunSingleCheck(id) {
     }
   } catch (err) {
     runInFlight = false;
+    if (reqEpoch !== workspaceSwitchEpoch) {
+      syncTopButtons();
+      return;
+    }
     transientActionError = `运行检查 ${id} 失败: ${err?.message || String(err)}`;
     if (lastSnapshot) {
       renderSnapshot(lastSnapshot);
@@ -780,7 +1012,18 @@ async function triggerRunSingleCheck(id) {
 }
 
 async function triggerRunAll() {
-  if (!isConnected || runInFlight) return;
+  if (
+    !canRunChecksInPane({
+      data: lastSnapshot,
+      isConnected,
+      busy: isAnyActionBusy(),
+      mode: currentMode,
+      selectedWorkspaceId,
+    })
+  ) {
+    return;
+  }
+  const reqEpoch = workspaceSwitchEpoch;
   runInFlight = true;
   transientActionError = null;
   syncTopButtons();
@@ -791,9 +1034,16 @@ async function triggerRunAll() {
   try {
     const res = await app.callServerTool({
       name: 'workbench_run_all',
-      arguments: {},
+      arguments: buildScopedToolArgs({
+        mode: currentMode,
+        workspaceId: selectedWorkspaceId,
+      }),
     });
     runInFlight = false;
+    if (reqEpoch !== workspaceSwitchEpoch) {
+      syncTopButtons();
+      return;
+    }
     if (res?.structuredContent) {
       snapshotVersion += 1;
       renderSnapshot(res.structuredContent);
@@ -805,6 +1055,10 @@ async function triggerRunAll() {
     }
   } catch (err) {
     runInFlight = false;
+    if (reqEpoch !== workspaceSwitchEpoch) {
+      syncTopButtons();
+      return;
+    }
     transientActionError = `全部运行调用失败: ${err?.message || String(err)}`;
     if (lastSnapshot) {
       renderSnapshot(lastSnapshot);
@@ -814,6 +1068,134 @@ async function triggerRunAll() {
     }
   }
 }
+
+async function handleAddTrustedWorkspace() {
+  if (!isConnected || currentMode !== 'global' || isAnyActionBusy()) return;
+  const rawPath = workspacePathInputEl.value.trim();
+  if (!rawPath) {
+    renderWorkspaceFeedback('error', '请输入工作区的绝对路径。');
+    workspacePathInputEl.focus();
+    return;
+  }
+
+  workspaceActionInFlight = true;
+  renderWorkspaceFeedback(null);
+  syncTopButtons();
+  try {
+    const res = await app.callServerTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: rawPath },
+    });
+    const payload = res?.structuredContent;
+    if (Array.isArray(payload?.trustedWorkspaces)) {
+      lastTrustedWorkspaces = payload.trustedWorkspaces;
+    }
+    if (payload?.ok && payload.addedWorkspace?.id) {
+      addWorkspaceBoxEl.classList.add('hidden');
+      workspacePathInputEl.value = '';
+      selectedWorkspaceId = payload.addedWorkspace.id;
+      resetPerPaneWorkspaceState();
+      renderWorkspaceFeedback('success', `已信任并绑定工作区：${payload.addedWorkspace.label}`);
+      workspaceActionInFlight = false;
+      renderWorkspaceSelector(lastTrustedWorkspaces);
+      syncTopButtons();
+      await refreshStatus({ manual: true, force: true });
+      return;
+    }
+    renderWorkspaceFeedback('error', payload?.error || '添加受信任工作区失败。');
+    renderWorkspaceSelector(lastTrustedWorkspaces);
+  } catch (err) {
+    renderWorkspaceFeedback('error', `添加受信任工作区失败: ${err?.message || String(err)}`);
+  } finally {
+    workspaceActionInFlight = false;
+    syncTopButtons();
+  }
+}
+
+async function handleRemoveTrustedWorkspace() {
+  if (!isConnected || currentMode !== 'global' || !selectedWorkspaceId || isAnyActionBusy()) {
+    return;
+  }
+  const targetId = selectedWorkspaceId;
+  workspaceActionInFlight = true;
+  renderWorkspaceFeedback(null);
+  syncTopButtons();
+  try {
+    const res = await app.callServerTool({
+      name: 'workbench_remove_trusted_workspace',
+      arguments: { workspaceId: targetId },
+    });
+    const payload = res?.structuredContent;
+    if (Array.isArray(payload?.trustedWorkspaces)) {
+      lastTrustedWorkspaces = payload.trustedWorkspaces;
+    }
+    if (payload?.ok) {
+      selectedWorkspaceId = '';
+      resetPerPaneWorkspaceState();
+      renderWorkspaceFeedback(
+        'info',
+        '已从受信任列表移除该工作区（本地项目文件与检查记录未被删除）。'
+      );
+      workspaceActionInFlight = false;
+      renderWorkspaceSelector(lastTrustedWorkspaces);
+      syncTopButtons();
+      await refreshStatus({ manual: true, force: true });
+      return;
+    }
+    renderWorkspaceFeedback('error', payload?.error || '移除受信任工作区失败。');
+    renderWorkspaceSelector(lastTrustedWorkspaces);
+  } catch (err) {
+    renderWorkspaceFeedback('error', `移除受信任工作区失败: ${err?.message || String(err)}`);
+  } finally {
+    workspaceActionInFlight = false;
+    syncTopButtons();
+  }
+}
+
+workspaceSelectEl.addEventListener('change', () => {
+  if (currentMode !== 'global' || isAnyActionBusy()) return;
+  selectedWorkspaceId = workspaceSelectEl.value || '';
+  renderWorkspaceFeedback(null);
+  resetPerPaneWorkspaceState();
+  renderWorkspaceSelector(lastTrustedWorkspaces);
+  if (lastSnapshot) renderChecksList(lastSnapshot);
+  syncTopButtons();
+  void refreshStatus({ manual: true, force: true });
+});
+
+toggleAddWorkspaceBtn.addEventListener('click', () => {
+  if (currentMode !== 'global' || isAnyActionBusy()) return;
+  const isHidden = addWorkspaceBoxEl.classList.contains('hidden');
+  renderWorkspaceFeedback(null);
+  if (isHidden) {
+    addWorkspaceBoxEl.classList.remove('hidden');
+    workspacePathInputEl.focus();
+  } else {
+    addWorkspaceBoxEl.classList.add('hidden');
+  }
+});
+
+cancelAddWorkspaceBtn.addEventListener('click', () => {
+  if (workspaceActionInFlight) return;
+  addWorkspaceBoxEl.classList.add('hidden');
+  workspacePathInputEl.value = '';
+  renderWorkspaceFeedback(null);
+});
+
+confirmAddWorkspaceBtn.addEventListener('click', () => {
+  void handleAddTrustedWorkspace();
+});
+
+workspacePathInputEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    void handleAddTrustedWorkspace();
+  }
+});
+
+removeWorkspaceBtn.addEventListener('click', () => {
+  void handleRemoveTrustedWorkspace();
+});
 
 runAllBtn.addEventListener('click', () => {
   triggerRunAll();
