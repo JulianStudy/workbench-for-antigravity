@@ -15,6 +15,7 @@ import {
   computeWorkspaceSelectSignature,
   createClearedGlobalSnapshot,
   createExpandedOutputLoader,
+  resolveNextTrustedWorkspaces,
   shouldShowReplaceEvidenceWarning,
 } from './pane-state.mjs';
 
@@ -1102,9 +1103,7 @@ async function handleAddTrustedWorkspace() {
       arguments: { workspacePath: rawPath },
     });
     const payload = res?.structuredContent;
-    if (Array.isArray(payload?.trustedWorkspaces)) {
-      lastTrustedWorkspaces = payload.trustedWorkspaces;
-    }
+    lastTrustedWorkspaces = resolveNextTrustedWorkspaces(lastTrustedWorkspaces, payload);
     if (payload?.ok && payload.addedWorkspace?.id) {
       addWorkspaceBoxEl.classList.add('hidden');
       workspacePathInputEl.value = '';
@@ -1147,9 +1146,7 @@ async function handleRemoveTrustedWorkspace() {
       arguments: { workspaceId: targetId },
     });
     const payload = res?.structuredContent;
-    if (Array.isArray(payload?.trustedWorkspaces)) {
-      lastTrustedWorkspaces = payload.trustedWorkspaces;
-    }
+    lastTrustedWorkspaces = resolveNextTrustedWorkspaces(lastTrustedWorkspaces, payload);
     if (payload?.ok) {
       selectedWorkspaceId = '';
       resetPerPaneWorkspaceState();

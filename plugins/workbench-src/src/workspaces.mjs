@@ -146,6 +146,10 @@ export function addTrustedWorkspace(pluginDataDir, rawPath) {
   }
 
   const trimmed = rawPath.trim();
+  if (!path.isAbsolute(trimmed)) {
+    throw new Error(`工作区路径必须是绝对路径，不支持相对路径或 "~": "${trimmed}"`);
+  }
+
   let realRoot;
   try {
     realRoot = fs.realpathSync(trimmed);

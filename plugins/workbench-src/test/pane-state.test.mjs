@@ -16,6 +16,7 @@ import {
   createClearedGlobalSnapshot,
   createExpandedOutputLoader,
   redactWorkspacePaths,
+  resolveNextTrustedWorkspaces,
   shouldShowReplaceEvidenceWarning,
   truncateUtf8TextToBudget,
   utf8ByteLength,
@@ -1252,6 +1253,39 @@ test('createClearedGlobalSnapshot clears all stale workspace summary, banner, an
   assert.equal(fatal.ok, false);
   assert.equal(fatal.rootError, '缺少可写的 PLUGIN_DATA 目录');
   assert.equal(createClearedGlobalSnapshot(null), null);
+});
+
+test('resolveNextTrustedWorkspaces preserves existing list on failed responses and updates on success', () => {
+  const existing = [
+    { id: 'aaaa1111bbbb', label: 'ws-a', path: '/tmp/ws-a', exists: true, hasConfig: true },
+    { id: 'cccc2222dddd', label: 'ws-b', path: '/tmp/ws-b', exists: true, hasConfig: false },
+  ];
+
+  // Error response with empty fallback must NOT wipe existing dropdown list
+  assert.deepEqual(
+    resolveNextTrustedWorkspaces(existing, { ok: false, error: 'EACCES', trustedWorkspaces: [] }),
+    existing
+  );
+
+  // Error response omitting trustedWorkspaces preserves existing list
+  assert.deepEqual(
+    resolveNextTrustedWorkspaces(existing, { ok: false, error: 'network error' }),
+    existing
+  );
+  assert.deepEqual(resolveNextTrustedWorkspaces(existing, null), existing);
+
+  // Error response with fresh non-empty registry snapshot adopts refreshed list
+  const refreshed = [existing[0]];
+  assert.deepEqual(
+    resolveNextTrustedWorkspaces(existing, { ok: false, busy: true, trustedWorkspaces: refreshed }),
+    refreshed
+  );
+
+  // Successful removal of the last workspace legitimately clears the list to []
+  assert.deepEqual(
+    resolveNextTrustedWorkspaces(existing, { ok: true, removed: true, trustedWorkspaces: [] }),
+    []
+  );
 });
 
 test('UI modules stay browser-compatible (no Buffer or node:* imports) and never call sendMessage', () => {

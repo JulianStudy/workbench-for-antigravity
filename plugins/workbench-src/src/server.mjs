@@ -1021,13 +1021,14 @@ export function createWorkbenchServer({
         };
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
+        const { trustedWorkspaces } = readGlobalRegistry();
         const payload = {
           ok: false,
           mode: 'global',
           busy: false,
           removed: false,
           error: errorMessage,
-          trustedWorkspaces: [],
+          trustedWorkspaces,
           pluginDir: runtimeCtx.pluginDir,
           rootError: null,
           timestamp: new Date().toISOString(),

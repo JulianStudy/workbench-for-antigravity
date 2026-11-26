@@ -1013,3 +1013,102 @@ test('Workspace Mode server blocks command-executing and mutating tools for non-
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }
 });
+
+test('Global Mode rejects relative workspace paths and preserves trustedWorkspaces when remove write fails', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-global-reg-'));
+  const fakeGlobalInstall = path.join(tmpBase, '.gemini', 'config', 'plugins', 'workbench');
+  const pluginDataDir = path.join(tmpBase, '.gemini', 'config', 'plugin-data', 'workbench');
+  fs.mkdirSync(path.dirname(fakeGlobalInstall), { recursive: true });
+  fs.cpSync(distPluginDir, fakeGlobalInstall, { recursive: true });
+
+  const workspaceA = createSandboxProject(tmpBase, 'reg-ws-a');
+  const workspaceB = createSandboxProject(tmpBase, 'reg-ws-b');
+
+  const mcpConfig = JSON.parse(
+    fs.readFileSync(path.join(fakeGlobalInstall, 'mcp_config.json'), 'utf8')
+  );
+  const resolvedArgs = mcpConfig.mcpServers.workbench_runner.args.map((arg) =>
+    arg
+      .replace('${PLUGIN_ROOT}', fakeGlobalInstall)
+      .replace('${PLUGIN_DATA}', pluginDataDir)
+  );
+
+  const client = await connectStdioServer(resolvedArgs, { PLUGIN_DATA: undefined });
+  let madeReadOnly = false;
+  try {
+    // 1. Relative and tilde paths are rejected before touching trusted-workspaces.json
+    for (const badPath of ['.', '..', 'relative-subdir', '~/demo']) {
+      const badRes = await client.callTool({
+        name: 'workbench_add_trusted_workspace',
+        arguments: { workspacePath: badPath },
+      });
+      assert.equal(badRes.structuredContent?.ok, false);
+      assert.match(badRes.structuredContent?.error || '', /绝对路径/);
+      assert.deepEqual(badRes.structuredContent?.trustedWorkspaces, []);
+    }
+    assert.equal(fs.existsSync(getTrustedWorkspacesFilePath(pluginDataDir)), false);
+
+    // 2. Seed two trusted workspaces
+    const addA = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: workspaceA },
+    });
+    const addB = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: workspaceB },
+    });
+    assert.equal(addA.structuredContent?.ok, true);
+    assert.equal(addB.structuredContent?.ok, true);
+    const idA = addA.structuredContent.addedWorkspace.id;
+    const idB = addB.structuredContent.addedWorkspace.id;
+
+    // 3. Adding a relative path when list is non-empty rejects AND preserves existing list
+    const relWhilePopulated = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: '.' },
+    });
+    assert.equal(relWhilePopulated.structuredContent?.ok, false);
+    assert.match(relWhilePopulated.structuredContent?.error || '', /绝对路径/);
+    assert.deepEqual(
+      relWhilePopulated.structuredContent?.trustedWorkspaces?.map((w) => w.id),
+      [idA, idB]
+    );
+
+    // 4. Simulate write failure during remove (read-only pluginDataDir blocks temp file creation)
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      const trustedFile = getTrustedWorkspacesFilePath(pluginDataDir);
+      const shaBefore = crypto
+        .createHash('sha256')
+        .update(fs.readFileSync(trustedFile))
+        .digest('hex');
+
+      fs.chmodSync(pluginDataDir, 0o555);
+      madeReadOnly = true;
+
+      const removeFail = await client.callTool({
+        name: 'workbench_remove_trusted_workspace',
+        arguments: { workspaceId: idA },
+      });
+      assert.equal(removeFail.structuredContent?.ok, false);
+      assert.equal(removeFail.structuredContent?.removed, false);
+      assert.ok(removeFail.structuredContent?.error);
+      assert.deepEqual(
+        removeFail.structuredContent?.trustedWorkspaces?.map((w) => w.id),
+        [idA, idB],
+        'failed remove must preserve existing trustedWorkspaces list instead of returning []'
+      );
+
+      const shaAfter = crypto
+        .createHash('sha256')
+        .update(fs.readFileSync(trustedFile))
+        .digest('hex');
+      assert.equal(shaAfter, shaBefore, 'trusted-workspaces.json must stay intact after failed remove');
+    }
+  } finally {
+    if (madeReadOnly) {
+      fs.chmodSync(pluginDataDir, 0o755);
+    }
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});

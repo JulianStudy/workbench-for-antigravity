@@ -34,11 +34,18 @@
    - 在 Antigravity 桌面 App `2.35.2` 会话中，宿主严格执行 `visibility: ["app"]`，仅向桌面 Agent 暴露只读入口工具 `open_workbench`；`workbench_add_trusted_workspace`、`workbench_remove_trusted_workspace`、`workbench_run_check`、`workbench_run_all`、`workbench_get_status` 对桌面 Agent 均不可见。
    - 单独实测确认桌面 Agent 可通过 `read_resource` 读取 `ui://workbench/pane.html`，因此本版本**未采用 HTML 内嵌 Token 的伪边界**，而是以 MCP `initialize` 阶段的 `clientCapabilities` 服务端门控 + 桌面宿主 `visibility: ["app"]` 共同构成信任边界。
 
-### 自动化测试与严格校验
+### 自动化测试、严格校验与发布 ZIP 全局安装验证
 
-- `cd plugins/workbench-src && npm ci && npm run build && npm test`（Node v24.22.3）：**62/62 通过，0 失败**。
-- `agy-node --test test/*.test.mjs`（App 自带 Node v24.22.0）：**62/62 通过，0 失败**。
-- `agy plugin validate --strict`：`dist/workbench`、全局安装目录 `~/.gemini/config/plugins/workbench` 及示例工作区安装目录 `work/workbench-demo/.agents/plugins/workbench-701df7f47d07` 均退出码 `0`（**0 error、0 warning、0 提示**）。
+- 在 `v0.2.0` 最终审查后补充了两项收敛修复与回归测试：
+  1. `addTrustedWorkspace` 强制要求绝对路径（拒绝 `.`、`..`、相对路径与 `~`），避免按 MCP 进程 `cwd` 误解析或写入信任文件；
+  2. `workbench_remove_trusted_workspace` 写入失败时服务端回读当前信任列表（而非返回 `[]`），且前端 `resolveNextTrustedWorkspaces` 在失败响应下保留现有下拉列表。
+- `cd plugins/workbench-src && npm run build && npm test`（Node v24.22.3）：**65/65 通过，0 失败**。
+- `agy-node --test test/*.test.mjs`（App 自带 Node v24.22.0）：**65/65 通过，0 失败**。
+- `agy plugin validate --strict`：`dist/workbench`、发布 ZIP 解压后的 `dist/workbench`、全局安装目录 `~/.gemini/config/plugins/workbench` 及示例工作区安装目录 `work/workbench-demo/.agents/plugins/workbench-701df7f47d07` 均退出码 `0`（**0 error、0 warning、0 提示**）。
+- **实际发布 ZIP 全局安装实测**：将 `workbench-for-antigravity-v0.2.0.zip`（SHA-256 `ba952de4bf83acc833fed6310d45705cc1f24a63b2c4fa4c84ecff2cbfb359d1`）解压到干净目录，无需 `npm install`，直接运行 `agy plugin install <解压目录>/dist/workbench` 覆盖安装至 `~/.gemini/config/plugins/workbench`：
+  - 解压目录与已安装目录逐文件 SHA-256 完全一致；
+  - `${PLUGIN_DATA}/trusted-workspaces.json` 哈希（`6fce3207...71f19b`）安装前后零变化；
+  - 以 `agy-node` 直连已安装的 `~/.gemini/config/plugins/workbench/dist/server.cjs`（使用临时 `--plugin-data`）验证：`workbench_ping` 返回 `mode: global`，相对路径 `.` 被拒绝，非 UI 客户端被服务端门控拒绝。
 
 ---
 

@@ -307,6 +307,17 @@ export function computeWorkspaceSelectSignature(
   });
 }
 
+export function resolveNextTrustedWorkspaces(currentList, payload) {
+  const prev = Array.isArray(currentList) ? currentList : [];
+  if (!payload || !Array.isArray(payload.trustedWorkspaces)) {
+    return prev;
+  }
+  if (payload.ok === true) {
+    return payload.trustedWorkspaces;
+  }
+  return payload.trustedWorkspaces.length > 0 ? payload.trustedWorkspaces : prev;
+}
+
 export function createClearedGlobalSnapshot(snapshot, trustedWorkspaces = null) {
   if (!snapshot || typeof snapshot !== 'object') {
     return null;

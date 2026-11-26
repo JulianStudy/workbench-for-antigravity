@@ -122,6 +122,23 @@ test('addTrustedWorkspace rejects invalid paths, files, NUL bytes, and filesyste
   }
 });
 
+test('addTrustedWorkspace rejects relative and tilde paths without resolving process.cwd()', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-ws-relative-'));
+  try {
+    const dataDir = path.join(tmpBase, 'plugin-data');
+    for (const badPath of ['.', '..', './relative-dir', 'relative/path', '~/workspace']) {
+      assert.throws(() => addTrustedWorkspace(dataDir, badPath), /绝对路径/);
+    }
+    assert.equal(
+      fs.existsSync(getTrustedWorkspacesFilePath(dataDir)),
+      false,
+      'trusted-workspaces.json must not be created for rejected relative paths'
+    );
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
 test('readTrustedWorkspaces reports corrupt JSON and invalid schema cleanly, and deduplicates valid entries', () => {
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-ws-corrupt-'));
   try {
