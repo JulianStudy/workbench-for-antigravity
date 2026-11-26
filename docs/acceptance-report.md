@@ -1,5 +1,47 @@
 # Workbench 桌面验收记录
 
+## `v0.2.0` 候选版本验收（分支 `workbench/v0.2.0-marketplace`）
+
+开发与桌面验收环境：Antigravity 桌面 App **2.35.2**、`agy` CLI **1.5.16**、App 自带 Node.js **v24.22.0**（开发构建与 `npm test` 使用 Node.js **v24.22.3**）。
+
+### 全局模式宿主探测结论（Antigravity 2.35.2）
+
+- 全局安装插件可正常加载各工作区会话侧栏（`aux_pane`），由单个 MCP 服务进程处理多会话请求；`${PLUGIN_DATA}` 正确展开且可写；会话侧栏声明支持 `updateModelContext`。
+- 宿主未声明 MCP `roots` 能力（`roots/list` 返回 `-31001`），`cwd`、`hostContext` 与请求元数据均不携带当前项目路径或 ID。
+- 因此 `v0.2.0` 采用**每侧栏独立显式绑定**：受信任工作区列表持久化在 `${PLUGIN_DATA}/trusted-workspaces.json`，每次状态与运行请求由对应侧栏显式携带自己的 `workspaceId`，未绑定时禁用执行；原有按工作区安装模式（`.agents/plugins/workbench-<12hex>/` + `--expected-root`）继续保持兼容。
+
+### 桌面验收：详情卡与全局模式 `A → B → A` 隔离（基于提交 `334af13`）
+
+通过 `agy plugin install dist/workbench` 安装至 `~/.gemini/config/plugins/workbench`，全程未重启 App、未刷新 MCP、未修改代码：
+
+| 验收项 | 实测结果 |
+| --- | --- |
+| Customizations 详情卡 | `Customizations → Installed → Workbench` 正常渲染 1:1 `assets/logo.svg`、154 字符描述、3 条 `suggestedPrompts` 快捷提示、`README.md` 与 `MCP` 标签页。 |
+| 初始未绑定与每侧栏独立绑定 | `workbench-demo`（A）与 `gate2-peer`（B）首次打开全局侧栏均显示「未绑定」且禁用运行。A 信任并绑定后，B 下拉框可见已登记的 A，但 B 仍处于未绑定状态直至独立绑定 B。 |
+| 双工作区运行与界面隔离 | 绑定后 A、B 各自「全部运行」均 `2/2` 通过（退出码均为 `0`）。B 跑完后切回一直打开的 A 侧栏，A 依然绑定 `workbench-demo`，未被 B 覆盖。 |
+| 磁盘结果文件哈希隔离 | A 于北京时间 `2026-11-26 12:28:52` 写入 `.workbench/results.json`（SHA-256 `82e34a6b2207a85d84798b72a9238f904cf18304217cfe998459f93fd797a5d6`）。随后 B 运行仅于 `12:29:41` 更新 B 的 `.workbench/results.json`（SHA-256 `1cb08fc88bbf9c0a71869ecc91f08c8a0bdb71c6877008bad1f83ba8b5f1883e`），A 的文件哈希与修改时间均保持不变。全局 `${PLUGIN_DATA}/trusted-workspaces.json` 记录了 `workbench-demo`（`701df7f47d07`）与 `gate2-peer`（`545f1db34d4e`）。 |
+
+### 安全边界验收：非 UI 宿主（CLI）与桌面 Agent
+
+1. **真实 `agy` CLI 服务端拒绝**：在临时项目 `/tmp/wb-cli-sec-test` 下使用临时会话权限 `--settings '{"permissions":{"allow":["mcp(*)"]}}'` 让真实 `agy` CLI（`1.5.16`）直接触达已重装的全局 `0.2.0` 服务：
+   - 只读 `workbench_ping` 正常返回（`mode: global`）；
+   - `workbench_add_trusted_workspace`、`workbench_run_check`、`workbench_run_all` 均被服务端 `io.modelcontextprotocol/ui`（`text/html;profile=mcp-app`）能力门控直接拒绝（返回 `isError: true` 与拒绝说明）；
+   - 磁盘核对确认空列表场景下未创建 `trusted-workspaces.json`，预置信任文件场景下未生成 `executed.marker` 也未创建 `.workbench/results.json`。
+2. **移除信任（`workbench_remove_trusted_workspace`）的双重验证**：
+   - 在真实 `agy` CLI 中调用 `workbench_remove_trusted_workspace` 被 CLI 拒绝（`tool workbench_remove_trusted_workspace is not enabled for server workbench_workbench_runner`），预置的 `trusted-workspaces.json` SHA-256（`c9bd5a08...500d5`）前后完全一致；
+   - 在 `plugins/workbench-src/test/server-smoke.test.mjs` 中通过非 UI MCP 客户端直连打包产物 `dist/server.cjs`（全局模式与工作区模式），进一步实测确认服务端门控直接拒绝 `workbench_remove_trusted_workspace`（`isError: true`、`blockedByUiHostGate: true`）且 `trusted-workspaces.json` 哈希零变化。
+3. **桌面 Agent 工具可见性与资源读取边界**：
+   - 在 Antigravity 桌面 App `2.35.2` 会话中，宿主严格执行 `visibility: ["app"]`，仅向桌面 Agent 暴露只读入口工具 `open_workbench`；`workbench_add_trusted_workspace`、`workbench_remove_trusted_workspace`、`workbench_run_check`、`workbench_run_all`、`workbench_get_status` 对桌面 Agent 均不可见。
+   - 单独实测确认桌面 Agent 可通过 `read_resource` 读取 `ui://workbench/pane.html`，因此本版本**未采用 HTML 内嵌 Token 的伪边界**，而是以 MCP `initialize` 阶段的 `clientCapabilities` 服务端门控 + 桌面宿主 `visibility: ["app"]` 共同构成信任边界。
+
+### 自动化测试与严格校验
+
+- `cd plugins/workbench-src && npm ci && npm run build && npm test`（Node v24.22.3）：**62/62 通过，0 失败**。
+- `agy-node --test test/*.test.mjs`（App 自带 Node v24.22.0）：**62/62 通过，0 失败**。
+- `agy plugin validate --strict`：`dist/workbench`、全局安装目录 `~/.gemini/config/plugins/workbench` 及示例工作区安装目录 `work/workbench-demo/.agents/plugins/workbench-701df7f47d07` 均退出码 `0`（**0 error、0 warning、0 提示**）。
+
+---
+
 ## `v0.1.0-alpha.3` 候选版本验收（分支 `workbench/alpha.3`）
 
 开发与桌面验收环境：Antigravity 桌面 App **2.34.0**、`agy` CLI **1.5.16**、App 自带 Node.js **v24.22.0**（开发构建与 `npm test` 使用 Node.js **v24.22.3**）。
