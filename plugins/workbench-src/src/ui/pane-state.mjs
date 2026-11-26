@@ -307,6 +307,46 @@ export function computeWorkspaceSelectSignature(
   });
 }
 
+export function createClearedGlobalSnapshot(snapshot, trustedWorkspaces = null) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return null;
+  }
+  const hasRootError = Boolean(snapshot.rootError);
+  const nextTrusted = Array.isArray(trustedWorkspaces)
+    ? trustedWorkspaces
+    : Array.isArray(snapshot.trustedWorkspaces)
+      ? snapshot.trustedWorkspaces
+      : [];
+  return {
+    ...snapshot,
+    ok: !hasRootError,
+    error: null,
+    mode: 'global',
+    workspaceBound: false,
+    selectedWorkspace: null,
+    trustedWorkspaces: nextTrusted,
+    projectRoot: null,
+    configOk: false,
+    configError: null,
+    bindingError: null,
+    persistenceError: null,
+    checkDetail: null,
+    checks: [],
+    counts: {
+      total: 0,
+      not_run: 0,
+      passed: 0,
+      failed: 0,
+      stale: 0,
+      error: 0,
+    },
+    isRunning: false,
+    runningCheckId: null,
+    runningBatch: false,
+    skippedChecks: [],
+  };
+}
+
 export function computeChecksRenderSignature({
   data,
   isConnected,

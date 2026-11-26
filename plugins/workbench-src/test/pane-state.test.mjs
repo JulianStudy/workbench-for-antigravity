@@ -13,6 +13,7 @@ import {
   clearErroredOutputCache,
   computeChecksRenderSignature,
   computeWorkspaceSelectSignature,
+  createClearedGlobalSnapshot,
   createExpandedOutputLoader,
   redactWorkspacePaths,
   shouldShowReplaceEvidenceWarning,
@@ -1187,6 +1188,70 @@ test('createExpandedOutputLoader ignores discarded stale-epoch responses without
 
   assert.equal(outputCache.get('format-total')?.output, 'workspace-B-output');
   assert.equal(outputCache.get('format-total')?.error, null);
+});
+
+test('createClearedGlobalSnapshot clears all stale workspace summary, banner, and check fields while preserving runtime metadata and rootError', () => {
+  const dirty = makeSnapshot({
+    ok: false,
+    error: 'stale run error',
+    mode: 'global',
+    workspaceBound: true,
+    selectedWorkspace: { id: 'aaaa1111bbbb', label: 'ws-a', path: '/tmp/ws-a' },
+    trustedWorkspaces: [{ id: 'aaaa1111bbbb', label: 'ws-a', path: '/tmp/ws-a', exists: true, hasConfig: true }],
+    projectRoot: '/tmp/ws-a',
+    configOk: false,
+    configError: 'stale config error',
+    bindingError: 'stale binding error',
+    persistenceError: 'stale persistence error',
+    checkDetail: { ok: true, check: { id: 'format-total', lastRun: { output: 'secret-A' } } },
+    counts: { total: 2, not_run: 0, passed: 1, failed: 1, stale: 0, error: 0 },
+    isRunning: true,
+    runningCheckId: 'format-total',
+    runningBatch: true,
+    skippedChecks: [{ id: 'clean-label', name: 'clean', reason: 'config changed' }],
+    nodeVersion: 'v24.22.0',
+  });
+
+  const updatedWorkspaces = [
+    { id: 'cccc2222dddd', label: 'ws-b', path: '/tmp/ws-b', exists: true, hasConfig: true },
+  ];
+  const cleared = createClearedGlobalSnapshot(dirty, updatedWorkspaces);
+
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.error, null);
+  assert.equal(cleared.mode, 'global');
+  assert.equal(cleared.workspaceBound, false);
+  assert.equal(cleared.selectedWorkspace, null);
+  assert.deepEqual(cleared.trustedWorkspaces, updatedWorkspaces);
+  assert.equal(cleared.projectRoot, null);
+  assert.equal(cleared.configOk, false);
+  assert.equal(cleared.configError, null);
+  assert.equal(cleared.bindingError, null);
+  assert.equal(cleared.persistenceError, null);
+  assert.equal(cleared.checkDetail, null);
+  assert.deepEqual(cleared.checks, []);
+  assert.deepEqual(cleared.counts, {
+    total: 0,
+    not_run: 0,
+    passed: 0,
+    failed: 0,
+    stale: 0,
+    error: 0,
+  });
+  assert.equal(cleared.isRunning, false);
+  assert.equal(cleared.runningCheckId, null);
+  assert.equal(cleared.runningBatch, false);
+  assert.deepEqual(cleared.skippedChecks, []);
+  assert.equal(cleared.nodeVersion, 'v24.22.0');
+
+  // Preserves fatal rootError (e.g. missing PLUGIN_DATA)
+  const fatal = createClearedGlobalSnapshot(
+    makeSnapshot({ ok: false, mode: 'global', rootError: '缺少可写的 PLUGIN_DATA 目录' }),
+    []
+  );
+  assert.equal(fatal.ok, false);
+  assert.equal(fatal.rootError, '缺少可写的 PLUGIN_DATA 目录');
+  assert.equal(createClearedGlobalSnapshot(null), null);
 });
 
 test('UI modules stay browser-compatible (no Buffer or node:* imports) and never call sendMessage', () => {
