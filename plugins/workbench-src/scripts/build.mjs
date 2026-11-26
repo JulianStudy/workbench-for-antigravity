@@ -66,6 +66,11 @@ async function main() {
     fs.copyFileSync(path.join(pkgRoot, manifestFile), path.join(distPluginDir, manifestFile));
   }
 
+  const assetsSrc = path.join(pkgRoot, 'assets');
+  if (fs.existsSync(assetsSrc)) {
+    fs.cpSync(assetsSrc, path.join(distPluginDir, 'assets'), { recursive: true });
+  }
+
   const readmeSrc = path.join(pkgRoot, 'README.md');
   if (fs.existsSync(readmeSrc)) {
     fs.copyFileSync(readmeSrc, path.join(distPluginDir, 'README.md'));

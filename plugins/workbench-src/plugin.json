@@ -1,6 +1,26 @@
 {
   "name": "workbench",
   "displayName": "Workbench",
-  "description": "Local acceptance check sidebar for running a fixed project test and tracking staleness against source changes.",
-  "version": "0.1.0"
+  "description": "Run configurable project acceptance checks from a side panel, track source and config staleness, and explicitly attach redacted failure summaries to chat.",
+  "version": "0.2.0",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "JulianStudy",
+    "url": "https://github.com/JulianStudy"
+  },
+  "homepage": "https://github.com/JulianStudy/workbench-for-antigravity",
+  "repository": "https://github.com/JulianStudy/workbench-for-antigravity",
+  "keywords": [
+    "workbench",
+    "testing",
+    "acceptance",
+    "verification",
+    "checklist",
+    "mcp-app"
+  ],
+  "suggestedPrompts": [
+    "Open Workbench to review and run acceptance checks for this project",
+    "Help me create a workbench.json checklist for this repository's tests",
+    "Use the attached Workbench failure evidence to diagnose and fix the failing test"
+  ]
 }

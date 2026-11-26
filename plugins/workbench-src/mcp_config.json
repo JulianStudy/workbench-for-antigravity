@@ -2,7 +2,7 @@
   "mcpServers": {
     "workbench_runner": {
       "command": "node",
-      "args": ["${PLUGIN_ROOT}/dist/server.cjs"]
+      "args": ["${PLUGIN_ROOT}/dist/server.cjs", "--plugin-data", "${PLUGIN_DATA}"]
     }
   }
 }

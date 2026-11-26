@@ -35,6 +35,18 @@ export function resolveProjectRootFromPluginDir(pluginDir) {
 }
 
 /**
+ * Return true iff `realpathSync(pluginDir)` lives directly under `<root>/.agents/plugins/<dir>`.
+ */
+export function isInstalledUnderWorkspacePluginsDir(pluginDir) {
+  try {
+    resolveProjectRootFromPluginDir(pluginDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Validate that the resolved project root matches the bound `--expected-root` workspace path.
  */
 export function validateRootBinding(projectRoot, expectedRoot) {

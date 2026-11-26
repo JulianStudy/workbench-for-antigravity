@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { installWorkspacePlugin } from '../scripts/install-workspace.mjs';
+import { parseServerArgs, resolveServerMode } from '../src/server.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../..');
@@ -40,11 +41,21 @@ function createSandboxProject(tmpBase, name = 'demo-e2e') {
   return sandboxProject;
 }
 
-async function connectStdioServer(args) {
+async function connectStdioServer(args, envOverrides = null) {
+  const env = { ...process.env };
+  if (envOverrides) {
+    for (const [key, val] of Object.entries(envOverrides)) {
+      if (val === undefined) {
+        delete env[key];
+      } else {
+        env[key] = val;
+      }
+    }
+  }
   const transport = new StdioClientTransport({
     command: process.execPath,
     args,
-    env: { ...process.env },
+    env,
     stderr: 'pipe',
   });
   const client = new Client({ name: 'workbench-e2e-test', version: '0.1.0' });
@@ -354,6 +365,371 @@ test('open_workbench isolates check output across both content and structuredCon
       (failDetail.structuredContent?.check?.lastRun?.output || '').includes(`${UNIQUE_MARKER}_FAIL`),
       'workbench_get_status({ id }) must return full output for failing check'
     );
+  } finally {
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('parseServerArgs and resolveServerMode handle dual-mode flags and global/workspace detection', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-dual-mode-'));
+  const origPluginData = process.env.PLUGIN_DATA;
+  try {
+    assert.deepEqual(
+      parseServerArgs(['--plugin-data', '/tmp/wb-data', '--mode', 'global']),
+      { expectedRoot: null, entryTitle: 'Workbench', pluginDataDir: '/tmp/wb-data', mode: 'global' }
+    );
+    assert.deepEqual(
+      parseServerArgs(['--plugin-data=/tmp/wb-data-2', '--mode=workspace']),
+      {
+        expectedRoot: null,
+        entryTitle: 'Workbench',
+        pluginDataDir: '/tmp/wb-data-2',
+        mode: 'workspace',
+      }
+    );
+
+    const projectRoot = path.join(tmpBase, 'proj');
+    const wsPluginDir = path.join(projectRoot, '.agents', 'plugins', 'workbench-0123456789ab');
+    const globalPluginDir = path.join(tmpBase, '.gemini', 'config', 'plugins', 'workbench');
+    const dataDir = path.join(tmpBase, 'data-dir');
+    const blockingFile = path.join(tmpBase, 'not-a-dir');
+    fs.mkdirSync(wsPluginDir, { recursive: true });
+    fs.mkdirSync(globalPluginDir, { recursive: true });
+    fs.writeFileSync(blockingFile, 'file', 'utf8');
+
+    // Workspace-scoped with expectedRoot -> workspace mode ok
+    const wsOk = resolveServerMode({ pluginDir: wsPluginDir, expectedRoot: projectRoot });
+    assert.equal(wsOk.ok, true);
+    assert.equal(wsOk.mode, 'workspace');
+    assert.equal(wsOk.projectRoot, fs.realpathSync(projectRoot));
+
+    // Workspace-scoped without expectedRoot -> workspace mode fail
+    const wsMissing = resolveServerMode({ pluginDir: wsPluginDir, expectedRoot: null });
+    assert.equal(wsMissing.ok, false);
+    assert.equal(wsMissing.mode, 'workspace');
+    assert.match(wsMissing.rootError || '', /--expected-root/);
+
+    // Global install with explicit pluginDataDir -> global mode ok
+    delete process.env.PLUGIN_DATA;
+    const globalOk = resolveServerMode({ pluginDir: globalPluginDir, pluginDataDir: dataDir });
+    assert.equal(globalOk.ok, true);
+    assert.equal(globalOk.mode, 'global');
+    assert.equal(globalOk.pluginDataDir, fs.realpathSync(dataDir));
+    assert.equal(globalOk.rootError, null);
+
+    // Global install without pluginDataDir or PLUGIN_DATA -> global mode fail
+    const globalMissingData = resolveServerMode({ pluginDir: globalPluginDir });
+    assert.equal(globalMissingData.ok, false);
+    assert.equal(globalMissingData.mode, 'global');
+    assert.match(globalMissingData.rootError || '', /PLUGIN_DATA/);
+
+    // Global install with file as pluginDataDir -> global mode fail
+    const globalBadData = resolveServerMode({
+      pluginDir: globalPluginDir,
+      pluginDataDir: blockingFile,
+    });
+    assert.equal(globalBadData.ok, false);
+    assert.equal(globalBadData.mode, 'global');
+
+    // Global install with PLUGIN_DATA env fallback -> global mode ok
+    process.env.PLUGIN_DATA = dataDir;
+    const globalEnvOk = resolveServerMode({ pluginDir: globalPluginDir });
+    assert.equal(globalEnvOk.ok, true);
+    assert.equal(globalEnvOk.mode, 'global');
+    assert.equal(globalEnvOk.pluginDataDir, fs.realpathSync(dataDir));
+
+    // Explicit mode=global overrides workspace pluginDir
+    const forcedGlobal = resolveServerMode({
+      pluginDir: wsPluginDir,
+      pluginDataDir: dataDir,
+      mode: 'global',
+    });
+    assert.equal(forcedGlobal.ok, true);
+    assert.equal(forcedGlobal.mode, 'global');
+  } finally {
+    if (origPluginData === undefined) {
+      delete process.env.PLUGIN_DATA;
+    } else {
+      process.env.PLUGIN_DATA = origPluginData;
+    }
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('bundled dist/server.cjs in Global Mode supports stateless multi-workspace binding, payload isolation, concurrent independent locks, and strict refusal when unbound', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-global-stdio-'));
+  const fakeGlobalInstall = path.join(tmpBase, '.gemini', 'config', 'plugins', 'workbench');
+  const pluginDataDir = path.join(tmpBase, '.gemini', 'config', 'plugin-data', 'workbench');
+  fs.mkdirSync(path.dirname(fakeGlobalInstall), { recursive: true });
+  fs.cpSync(distPluginDir, fakeGlobalInstall, { recursive: true });
+
+  const workspaceA = createSandboxProject(tmpBase, 'workspace-alpha');
+  const workspaceB = createSandboxProject(tmpBase, 'workspace-beta');
+  const untrustedWorkspace = createSandboxProject(tmpBase, 'workspace-untrusted');
+
+  // Inject unique marker in workspaceA to verify global-mode open_workbench output isolation
+  const UNIQUE_GLOBAL_MARKER = 'GLOBAL_ISO_MARKER_7c4a91';
+  const fmtTestA = path.join(workspaceA, 'test', 'format-total.test.mjs');
+  fs.writeFileSync(
+    fmtTestA,
+    `${fs.readFileSync(fmtTestA, 'utf8')}\nconsole.log('${UNIQUE_GLOBAL_MARKER}');\n`,
+    'utf8'
+  );
+
+  // Add a slow check to workspaceA for concurrent lock + busy-remove test
+  const cfgPathA = path.join(workspaceA, 'workbench.json');
+  const cfgA = JSON.parse(fs.readFileSync(cfgPathA, 'utf8'));
+  cfgA.checks.push({
+    id: 'slow-a',
+    name: '慢速检查 A',
+    command: ['node', '-e', 'setTimeout(() => process.exit(0), 350)'],
+    files: ['src/format-total.mjs'],
+    timeoutMs: 10000,
+  });
+  fs.writeFileSync(cfgPathA, JSON.stringify(cfgA, null, 2), 'utf8');
+
+  // Simulate Marketplace mcp_config.json expansion
+  const mcpConfig = JSON.parse(
+    fs.readFileSync(path.join(fakeGlobalInstall, 'mcp_config.json'), 'utf8')
+  );
+  const resolvedArgs = mcpConfig.mcpServers.workbench_runner.args.map((arg) =>
+    arg
+      .replace('${PLUGIN_ROOT}', fakeGlobalInstall)
+      .replace('${PLUGIN_DATA}', pluginDataDir)
+  );
+
+  const client = await connectStdioServer(resolvedArgs, { PLUGIN_DATA: undefined });
+  try {
+    // 1. Tool registration & visibility
+    const toolsResp = await client.listTools();
+    const byName = Object.fromEntries(toolsResp.tools.map((t) => [t.name, t]));
+    assert.deepEqual(byName.workbench_add_trusted_workspace?._meta?.ui?.visibility, ['app']);
+    assert.deepEqual(byName.workbench_remove_trusted_workspace?._meta?.ui?.visibility, ['app']);
+
+    // 2. Ping & open_workbench in unbound global mode
+    const pingRes = await client.callTool({ name: 'workbench_ping', arguments: {} });
+    assert.equal(pingRes.structuredContent?.ok, true);
+    assert.equal(pingRes.structuredContent?.mode, 'global');
+    assert.equal(pingRes.structuredContent?.pong, 'workbench-ok');
+
+    const openUnbound = await client.callTool({ name: 'open_workbench', arguments: {} });
+    assert.equal(openUnbound.structuredContent?.ok, true);
+    assert.equal(openUnbound.structuredContent?.mode, 'global');
+    assert.equal(openUnbound.structuredContent?.workspaceBound, false);
+    assert.equal(openUnbound.structuredContent?.projectRoot, null);
+    assert.deepEqual(openUnbound.structuredContent?.trustedWorkspaces, []);
+    assert.deepEqual(openUnbound.structuredContent?.checks, []);
+
+    // 3. Unbound / untrusted / raw-path execution MUST be refused without spawning
+    const runMissingId = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'format-total' },
+    });
+    assert.equal(runMissingId.structuredContent?.ok, false);
+    assert.equal(runMissingId.structuredContent?.workspaceBound, false);
+    assert.equal(runMissingId.structuredContent?.busy, false);
+
+    const runRawPath = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'format-total', workspaceId: untrustedWorkspace },
+    });
+    assert.equal(runRawPath.structuredContent?.ok, false);
+    assert.equal(runRawPath.structuredContent?.workspaceBound, false);
+    assert.equal(runRawPath.structuredContent?.busy, false);
+
+    const runAllUntrusted = await client.callTool({
+      name: 'workbench_run_all',
+      arguments: { workspaceId: 'deadbeef0000' },
+    });
+    assert.equal(runAllUntrusted.structuredContent?.ok, false);
+    assert.equal(runAllUntrusted.structuredContent?.workspaceBound, false);
+    assert.equal(fs.existsSync(path.join(untrustedWorkspace, '.workbench')), false);
+
+    // Untrusted workspaceId in workbench_get_status returns bindingError
+    const statusUntrusted = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { workspaceId: 'deadbeef0000' },
+    });
+    assert.equal(statusUntrusted.structuredContent?.ok, true);
+    assert.equal(statusUntrusted.structuredContent?.workspaceBound, false);
+    assert.ok(statusUntrusted.structuredContent?.bindingError);
+
+    // 4. Add trusted workspaces (reject filesystem root & missing path cleanly)
+    const addRootErr = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: path.parse(tmpBase).root },
+    });
+    assert.equal(addRootErr.structuredContent?.ok, false);
+    assert.ok(addRootErr.structuredContent?.error);
+
+    const addA = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: workspaceA },
+    });
+    assert.equal(addA.structuredContent?.ok, true);
+    assert.equal(addA.structuredContent?.mode, 'global');
+    const idA = addA.structuredContent?.addedWorkspace?.id;
+    assert.match(idA || '', /^[0-9a-f]{12}$/);
+    assert.equal(addA.structuredContent?.addedWorkspace?.exists, true);
+    assert.equal(addA.structuredContent?.addedWorkspace?.hasConfig, true);
+
+    const addB = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: workspaceB },
+    });
+    assert.equal(addB.structuredContent?.ok, true);
+    const idB = addB.structuredContent?.addedWorkspace?.id;
+    assert.notEqual(idA, idB);
+    assert.equal(addB.structuredContent?.trustedWorkspaces?.length, 2);
+
+    // 5. Stateless per-pane isolation: run check in A, verify B stays not_run, and vice versa
+    const runA = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'format-total', workspaceId: idA },
+    });
+    assert.equal(runA.structuredContent?.ok, true);
+    assert.equal(runA.structuredContent?.mode, 'global');
+    assert.equal(runA.structuredContent?.workspaceBound, true);
+    assert.equal(runA.structuredContent?.selectedWorkspace?.id, idA);
+    assert.equal(runA.structuredContent?.counts?.passed, 1);
+
+    const statusB = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { workspaceId: idB },
+    });
+    assert.equal(statusB.structuredContent?.workspaceBound, true);
+    assert.equal(statusB.structuredContent?.selectedWorkspace?.id, idB);
+    assert.equal(statusB.structuredContent?.counts?.passed, 0);
+    assert.equal(statusB.structuredContent?.counts?.not_run, 2);
+
+    // Payload isolation in global mode
+    const statusA = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { workspaceId: idA },
+    });
+    const statusAJson = JSON.stringify(statusA.structuredContent);
+    assert.equal(statusAJson.includes(UNIQUE_GLOBAL_MARKER), false);
+    assert.equal(/"output"\s*:/.test(statusAJson), false);
+
+    const detailA = await client.callTool({
+      name: 'workbench_get_status',
+      arguments: { workspaceId: idA, id: 'format-total' },
+    });
+    assert.ok(
+      (detailA.structuredContent?.check?.lastRun?.output || '').includes(UNIQUE_GLOBAL_MARKER)
+    );
+
+    // open_workbench remains strictly summary-only (zero check output)
+    const openAfterRuns = await client.callTool({ name: 'open_workbench', arguments: {} });
+    const openAfterText = JSON.stringify(openAfterRuns.content);
+    const openAfterStruct = JSON.stringify(openAfterRuns.structuredContent);
+    assert.equal(openAfterText.includes(UNIQUE_GLOBAL_MARKER), false);
+    assert.equal(openAfterStruct.includes(UNIQUE_GLOBAL_MARKER), false);
+    assert.equal(/"output"\s*:/.test(openAfterStruct), false);
+    assert.equal(openAfterRuns.structuredContent?.trustedWorkspaces?.length, 2);
+
+    // 6. Independent locks across workspaces + busy refusal on remove
+    const slowRunAPromise = client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'slow-a', workspaceId: idA },
+    });
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Workspace B runs concurrently without being blocked by Workspace A
+    const runBConcurrent = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'clean-label', workspaceId: idB },
+    });
+    assert.equal(runBConcurrent.structuredContent?.busy, false);
+    assert.equal(runBConcurrent.structuredContent?.counts?.passed, 1);
+
+    // Removing Workspace A while running MUST be refused with busy: true
+    const removeWhileBusy = await client.callTool({
+      name: 'workbench_remove_trusted_workspace',
+      arguments: { workspaceId: idA },
+    });
+    assert.equal(removeWhileBusy.structuredContent?.ok, false);
+    assert.equal(removeWhileBusy.structuredContent?.busy, true);
+
+    const slowRunARes = await slowRunAPromise;
+    assert.equal(slowRunARes.structuredContent?.busy, false);
+
+    // Now remove Workspace A succeeds and blocks future runs on idA
+    const removeDone = await client.callTool({
+      name: 'workbench_remove_trusted_workspace',
+      arguments: { workspaceId: idA },
+    });
+    assert.equal(removeDone.structuredContent?.ok, true);
+    assert.equal(removeDone.structuredContent?.removed, true);
+    assert.deepEqual(
+      removeDone.structuredContent?.trustedWorkspaces?.map((w) => w.id),
+      [idB]
+    );
+
+    const runAAfterRemove = await client.callTool({
+      name: 'workbench_run_check',
+      arguments: { id: 'format-total', workspaceId: idA },
+    });
+    assert.equal(runAAfterRemove.structuredContent?.ok, false);
+    assert.equal(runAAfterRemove.structuredContent?.workspaceBound, false);
+  } finally {
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('bundled dist/server.cjs in Global Mode disables execution when PLUGIN_DATA is missing', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-global-nodata-'));
+  const fakeGlobalInstall = path.join(tmpBase, '.gemini', 'config', 'plugins', 'workbench');
+  fs.mkdirSync(path.dirname(fakeGlobalInstall), { recursive: true });
+  fs.cpSync(distPluginDir, fakeGlobalInstall, { recursive: true });
+
+  const serverCjs = path.join(fakeGlobalInstall, 'dist', 'server.cjs');
+  const client = await connectStdioServer([serverCjs], { PLUGIN_DATA: undefined });
+  try {
+    const openRes = await client.callTool({ name: 'open_workbench', arguments: {} });
+    assert.equal(openRes.structuredContent?.ok, false);
+    assert.equal(openRes.structuredContent?.mode, 'global');
+    assert.match(openRes.structuredContent?.rootError || '', /PLUGIN_DATA/);
+
+    const addRes = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: tmpBase },
+    });
+    assert.equal(addRes.structuredContent?.ok, false);
+  } finally {
+    await client.close();
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+test('workspace-bound server rejects workbench_add_trusted_workspace and workbench_remove_trusted_workspace', async () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-ws-reject-global-tools-'));
+  const sandboxProject = createSandboxProject(tmpBase, 'demo-ws-only');
+  const installed = installWorkspacePlugin(sandboxProject, { distPluginDir });
+  const mcpConfig = JSON.parse(
+    fs.readFileSync(path.join(installed.installDir, 'mcp_config.json'), 'utf8')
+  );
+  const resolvedArgs = mcpConfig.mcpServers.workbench_runner.args.map((arg) =>
+    arg.replace('${PLUGIN_ROOT}', installed.installDir)
+  );
+
+  const client = await connectStdioServer(resolvedArgs);
+  try {
+    const addRes = await client.callTool({
+      name: 'workbench_add_trusted_workspace',
+      arguments: { workspacePath: sandboxProject },
+    });
+    assert.equal(addRes.structuredContent?.ok, false);
+    assert.equal(addRes.structuredContent?.mode, 'workspace');
+
+    const removeRes = await client.callTool({
+      name: 'workbench_remove_trusted_workspace',
+      arguments: { workspaceId: '0123456789ab' },
+    });
+    assert.equal(removeRes.structuredContent?.ok, false);
+    assert.equal(removeRes.structuredContent?.mode, 'workspace');
   } finally {
     await client.close();
     fs.rmSync(tmpBase, { recursive: true, force: true });

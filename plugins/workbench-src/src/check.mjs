@@ -662,5 +662,6 @@ export function createWorkbenchRunner({
     getStatus,
     runCheck,
     runAll,
+    isBusy: () => isRunning,
   };
 }

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="wb-card-bg" x1="16" y1="16" x2="100" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+    <linearGradient id="wb-shield-bg" x1="70" y1="62" x2="112" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+
+  <!-- Main rounded checklist card (10%+ transparent margin around 128x128 canvas) -->
+  <rect x="16" y="16" width="84" height="92" rx="16" fill="url(#wb-card-bg)" stroke="#64748B" stroke-width="2.5" />
+
+  <!-- Checklist Row 1 -->
+  <rect x="29" y="34" width="10" height="10" rx="3" fill="#10B981" />
+  <rect x="46" y="36" width="40" height="6" rx="3" fill="#E2E8F0" />
+
+  <!-- Checklist Row 2 -->
+  <rect x="29" y="55" width="10" height="10" rx="3" fill="#10B981" />
+  <rect x="46" y="57" width="34" height="6" rx="3" fill="#CBD5E1" />
+
+  <!-- Checklist Row 3 -->
+  <rect x="29" y="76" width="10" height="10" rx="3" fill="#38BDF8" />
+  <rect x="46" y="78" width="24" height="6" rx="3" fill="#94A3B8" />
+
+  <!-- Bold emerald verification shield badge -->
+  <path
+    d="M90 61 L111 69.5 V85.5 C111 98.5 102.2 108.4 90 113 C77.8 108.4 69 98.5 69 85.5 V69.5 L90 61 Z"
+    fill="url(#wb-shield-bg)"
+    stroke="#F8FAFC"
+    stroke-width="3"
+    stroke-linejoin="round"
+  />
+
+  <!-- Crisp checkmark inside shield -->
+  <path
+    d="M80.5 87 L87.2 93.8 L100.5 79.5"
+    stroke="#FFFFFF"
+    stroke-width="6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
